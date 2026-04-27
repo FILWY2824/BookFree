@@ -1,0 +1,4 @@
+github.com/golang/crypto v0.27.0 h1:Kzwi3so+1VYiXrZHnwG4LU9n3ZrFaNl9sDLLXjFJ8qI=
+github.com/golang/crypto v0.27.0/go.mod h1:1Xngt8kV6Dvbssa53Ziq6Eqn0HqbZi5Z6R0ZpwQzt70=
+github.com/mattn/go-sqlite3 v1.14.24 h1:tpSp2G2KyMnnQu99ngJ47EIkWVmliIizyZBfPrBWDRM=
+github.com/mattn/go-sqlite3 v1.14.24/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=

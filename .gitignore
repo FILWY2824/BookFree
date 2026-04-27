@@ -1,0 +1,27 @@
+# Build outputs
+/bookfree-server
+/apps/web/dist/
+/apps/web/node_modules/
+/apps/web/.npm-cache/
+/server/webdist/assets/
+/server/webdist/index.html
+/server/webdist/robots.txt
+
+# Runtime data
+/data/
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local env overrides
+.env
+.env.local
+
+.clinerules/
+
+

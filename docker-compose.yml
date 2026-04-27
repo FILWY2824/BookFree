@@ -1,0 +1,83 @@
+# BookFree — one-click deploy.
+#
+# Usage:
+#
+#     # First-time setup: generate a secret and start everything.
+#     ./docker-quickstart.sh
+#
+#     # Or by hand:
+#     export BOOKFREE_APP_SECRET=$(openssl rand -hex 32)
+#     docker compose up -d
+#
+# Logs:    docker compose logs -f
+# Stop:    docker compose down
+# Update:  docker compose pull && docker compose up -d --build
+#
+# Persistence: ./data/ on the host is bind-mounted into /app/data inside
+# the container. SQLite database, book files, and uploads all live there.
+# Back this up.
+
+services:
+  bookfree:
+    # `build: .` lets `docker compose up` build the image from this repo.
+    # If you'd rather pull a pre-built image, replace with `image: ...`.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bookfree:latest
+    container_name: bookfree
+    restart: unless-stopped
+
+    # Bind-mount host ./data into the container. Using a bind mount (as
+    # opposed to a named volume) makes backups trivially `tar czf` of the
+    # host directory.
+    volumes:
+      - ./data:/app/data
+
+    # Localhost-only by default. Front this with Caddy / Nginx / Traefik
+    # for TLS and external access. To expose directly, change to "8788:8788".
+    ports:
+      - "127.0.0.1:8788:8788"
+
+    environment:
+      # REQUIRED. The compose-runner shell must export this — see
+      # docker-quickstart.sh for the standard recipe. We do NOT put a
+      # default here; missing secret should fail loudly, not quietly use
+      # a known string.
+      BOOKFREE_APP_SECRET: "${BOOKFREE_APP_SECRET:?BOOKFREE_APP_SECRET must be set — run docker-quickstart.sh or export it}"
+
+      # Tunables — uncomment / change as needed.
+      # BOOKFREE_LOG_LEVEL: info
+      # BOOKFREE_MAX_UPLOAD_SIZE_MB: 200
+      # BOOKFREE_ALLOW_REGISTRATION: "1"   # default off in production
+      # GOMEMLIMIT: 48MiB
+      # TZ: Asia/Shanghai
+
+    # Memory limits as a hard backstop. Our actual usage is ~32 MB at idle
+    # and stays flat under load, but pinning at the container level guards
+    # against future regressions and gives the OOM killer a clean target.
+    # The reservation gets honored by the scheduler; the limit is the cap.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
+
+    # Container-level healthcheck mirrors the one in the Dockerfile.
+    # Operators using a load balancer can poll /api/health directly; this
+    # is for `docker ps` to show health status without external tooling.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--tries=1", "--timeout=4", "http://127.0.0.1:8788/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # Light log size cap — without this, an over-talkative AI worker could
+    # fill the disk with json-file driver output. 10 MB × 3 = 30 MB max.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

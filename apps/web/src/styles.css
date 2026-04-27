@@ -1,0 +1,134 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* LXGW WenKai is the recommended CJK font but it's a 30 MB asset.
+   We load it lazily over jsdelivr so reader components feel right
+   on Chinese text without bloating the cold-start bundle. The CSP
+   in middleware.go allows cdn.jsdelivr.net specifically for this. */
+@font-face {
+  font-family: 'LXGW WenKai';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('https://cdn.jsdelivr.net/npm/lxgw-wenkai-webfont@1.7.0/lxgwwenkai-regular.woff2') format('woff2');
+}
+
+:root {
+  /* Light reader theme is the default. Each theme below overrides
+     these on a [data-reader-theme="..."] selector at the reader root. */
+  --reader-bg: #FAF7F2;
+  --reader-fg: #1B2230;
+  --reader-border: #EBE5D9;
+  --reader-muted: #7A828F;
+  --reader-accent: #7C5A3A;
+}
+
+[data-reader-theme="light"]  { --reader-bg: #FAF7F2; --reader-fg: #1B2230; --reader-border: #EBE5D9; --reader-muted: #7A828F; }
+[data-reader-theme="sepia"]  { --reader-bg: #F4ECDA; --reader-fg: #3B2D1A; --reader-border: #E5D7B7; --reader-muted: #6E5B3A; }
+[data-reader-theme="eye"]    { --reader-bg: #DDEAD3; --reader-fg: #1F2E1B; --reader-border: #B7CCA6; --reader-muted: #4D6443; }
+[data-reader-theme="mist"]   { --reader-bg: #E7ECEF; --reader-fg: #1A2330; --reader-border: #C9D2D9; --reader-muted: #5A6878; }
+[data-reader-theme="peach"]  { --reader-bg: #FBE5DA; --reader-fg: #4A2415; --reader-border: #F0CCB8; --reader-muted: #84493A; }
+[data-reader-theme="forest"] { --reader-bg: #1F2E22; --reader-fg: #D9E5D2; --reader-border: #2F4233; --reader-muted: #95A892; }
+[data-reader-theme="slate"]  { --reader-bg: #232831; --reader-fg: #DCE2EA; --reader-border: #313945; --reader-muted: #98A2B0; }
+[data-reader-theme="dark"]   { --reader-bg: #0F1420; --reader-fg: #DCE2EA; --reader-border: #232A38; --reader-muted: #8C95A4; }
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply bg-paper-50 text-ink-800 antialiased;
+}
+
+/* Selection in the reader — uses the active accent so highlights feel
+   coherent regardless of which theme is on. */
+.reader-prose ::selection {
+  background: rgba(124, 90, 58, 0.25);
+}
+
+/* Tailwind doesn't ship a typographic prose stack by default; we keep
+   it minimal and tuned to the reader column. */
+.reader-prose {
+  font-family: theme('fontFamily.serif');
+  line-height: 1.85;
+  color: var(--reader-fg);
+}
+.reader-prose p { margin: 1em 0; }
+.reader-prose h1, .reader-prose h2, .reader-prose h3 {
+  font-weight: 600;
+  margin: 1.5em 0 0.6em;
+  color: var(--reader-fg);
+}
+.reader-prose h1 { font-size: 1.5em; }
+.reader-prose h2 { font-size: 1.25em; }
+.reader-prose h3 { font-size: 1.1em; }
+.reader-prose img { max-width: 100%; height: auto; margin: 1em auto; display: block; }
+.reader-prose blockquote {
+  border-left: 3px solid var(--reader-border);
+  padding-left: 1em;
+  color: var(--reader-muted);
+  margin: 1em 0;
+}
+.reader-prose hr {
+  border: none;
+  border-top: 1px solid var(--reader-border);
+  margin: 2em 0;
+}
+.reader-prose code {
+  background: var(--reader-border);
+  padding: 0.1em 0.4em;
+  border-radius: 0.2em;
+  font-size: 0.9em;
+}
+.reader-prose pre {
+  background: var(--reader-border);
+  padding: 1em;
+  border-radius: 0.5em;
+  overflow-x: auto;
+}
+
+/* Highlight colours — anchored on the ::mark element painted in by
+   the reader. We use translucent fills so they layer over either
+   light or dark themes. */
+.hl-yellow { background: rgba(255, 217, 0, 0.40); }
+.hl-red    { background: rgba(255, 99, 99, 0.35); }
+.hl-green  { background: rgba(95, 200, 110, 0.35); }
+.hl-blue   { background: rgba(99, 165, 255, 0.35); }
+.hl-purple { background: rgba(186, 130, 235, 0.35); }
+.hl-orange { background: rgba(255, 159, 80, 0.40); }
+
+/* The library's bookcard: a portrait card with a paper texture. */
+.book-card-spine {
+  background: linear-gradient(110deg,
+    var(--card-spine, #7C5A3A) 0%,
+    var(--card-spine, #7C5A3A) 8%,
+    var(--card-cover, #A57E55) 8%,
+    var(--card-cover, #A57E55) 100%);
+}
+
+/* Hide scrollbars on chromeless containers without disabling scroll. */
+.scrollbar-thin::-webkit-scrollbar { width: 8px; }
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+
+/* Drawer slide-in animation. */
+@keyframes drawer-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0);    }
+}
+.animate-drawer-in {
+  animation: drawer-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Modal fade-in. */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-fade-in {
+  animation: fade-in 160ms ease-out;
+}

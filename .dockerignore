@@ -1,0 +1,46 @@
+# Massively reduces build context size — without this, Docker uploads the
+# whole project tree to the daemon on every `docker build`, including the
+# 350 MB node_modules and the 7 MB pre-built binary, neither of which the
+# image ever uses.
+
+# Build outputs we'll regenerate inside the image
+bookfree-server
+bookfree-server.exe
+apps/web/dist/
+apps/web/node_modules/
+server/webdist/assets/index-*
+server/webdist/assets/react-*
+server/webdist/assets/*.css
+
+# Runtime data — never goes in the image
+data/
+
+# Git metadata
+.git/
+.gitignore
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CI / docs metadata
+.github/
+*.md
+!README.md
+
+# Tarballs the project tree might contain
+*.tar.gz
+
+# Local env files — secrets don't go in build context
+.env
+.env.local
+.env.*.local
+
+# The Dockerfile itself doesn't need to copy
+Dockerfile
+.dockerignore
+docker-compose.yml

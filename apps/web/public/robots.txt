@@ -1,0 +1,4 @@
+# Default: don't index. Operators with public deployments can override
+# this file in their build, or add a reverse-proxy rewrite.
+User-agent: *
+Disallow: /

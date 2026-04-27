@@ -1,0 +1,31 @@
+-- ─────────────────────────────────────────────────────────────────────────
+-- 0016_user_memory_edits.sql — follow-up to 0015_ai_memory.sql
+-- ─────────────────────────────────────────────────────────────────────────
+--
+-- Adds `user_memory.user_edited_fields` so that the background L3
+-- extractor can tell apart AI-generated content from content the user
+-- manually edited on the Settings page, and refuse to overwrite the
+-- latter.
+--
+-- Schema:
+--   user_edited_fields TEXT NULL
+--     JSON-encoded array of dimension keys the user has explicitly
+--     edited (e.g. '["response_preferences","goals"]').
+--     • NULL or '' / '[]'            → no user edits; AI owns everything.
+--     • Key present in the array     → AI must skip this field on update.
+--     • User clears a field (empty   → key is removed from the array so
+--       string saved via PATCH)        AI can re-populate it next pass.
+--
+-- Rationale for separate column vs. per-row flags:
+--   • Additive; safe to deploy with zero downtime.
+--   • Cheap to load (single TEXT column) alongside the row we already
+--     read in every memory call.
+--   • Decouples "user locked this field" from "user cleared this field";
+--     an empty string still reads as empty while the lock lives here.
+--
+-- Rollback: `ALTER TABLE user_memory DROP COLUMN user_edited_fields;`
+-- (The DAL's ensureTable will tolerate a missing column — it re-adds it
+--  idempotently via a try/catch on ALTER TABLE ADD COLUMN.)
+-- ─────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE user_memory ADD COLUMN user_edited_fields TEXT;
