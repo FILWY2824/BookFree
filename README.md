@@ -1,76 +1,65 @@
 # BookFree
 
-A self-hosted reader. Go backend + Vite/React SPA, single binary, low
-RSS, embedded SQLite. Supports EPUB, PDF, and TXT ingestion in the
-browser, with full-text CJK search, highlights, notes, reading
-progress, and 8 reader themes.
+一个自托管阅读器。后端使用 Go，前端是 Vite/React 单页应用；支持单个二进制文件部署、低 RSS 内存占用和内嵌 SQLite。支持在浏览器中导入 EPUB、PDF 和 TXT，提供中日韩全文搜索、划线、高亮、笔记、阅读进度以及 8 种阅读主题。
 
-> **Status (post-audit):** every P0/P1 item from the production audit
-> is fixed. AI chat, MOBI/AZW/FB2/CBZ parsing, the admin panel UI,
-> OAuth, and Foliate-based readers are intentionally out of scope; see
-> [`docs/MIGRATION-PROGRESS.md`](./docs/MIGRATION-PROGRESS.md) for the
-> long-form status matrix.
+> **状态（审计后）：** 生产审计中的所有 P0/P1 项目都已修复。AI 聊天、MOBI/AZW/FB2/CBZ 解析、管理面板 UI、OAuth 以及基于 Foliate 的阅读器有意不包含在当前范围内；完整状态矩阵请查看 [`docs/MIGRATION-PROGRESS.md`](./docs/MIGRATION-PROGRESS.md)。
 
-## Quick start (Docker)
+## 快速开始（Docker）
 
 ```sh
-# 1. Generate a secret and write it to .env (one-time).
+# 1. 生成密钥并写入 .env（一次性操作）。
 echo "BOOKFREE_APP_SECRET=$(openssl rand -hex 32)" > .env
 
-# 2. Build and start.
+# 2. 构建并启动。
 docker compose --env-file .env up -d --build
 
-# 3. Wait a few seconds for /api/health to flip green.
+# 3. 等待几秒钟，直到 /api/health 变为健康状态。
 curl -fsS http://127.0.0.1:8788/api/health | jq
 
-# 4. Create the first admin user. Self-serve registration is OFF in
-#    production, so you have two paths:
+# 4. 创建第一个管理员用户。生产环境默认关闭自助注册，
+#    因此有两种方式：
 #
-#    A. Pre-create + promote via CLI (recommended).
-#       Open the registration once with the env flag set, register,
-#       turn it back off:
+#    A. 先创建账号，再通过 CLI 提升为管理员（推荐）。
+#       临时打开注册，注册完成后再关闭：
 docker compose --env-file .env exec -e BOOKFREE_ALLOW_REGISTRATION=1 bookfree \
   /app/bookfree-server make-admin you@example.com
 #
-#    B. Or run permanently with registration on (single-user / trusted
-#       network). Add to .env then `docker compose up -d`:
+#    B. 或者长期打开注册（适合单用户/可信网络）。
+#       将下面配置加入 .env 后执行 `docker compose up -d`：
 #       BOOKFREE_ALLOW_REGISTRATION=1
 ```
 
-Then visit <http://127.0.0.1:8788>.
+然后访问 <http://127.0.0.1:8788>。
 
-The legacy `docker-quickstart.sh` script is still present for
-convenience but the four commands above are exactly what it runs and
-are clearer to debug when something goes wrong.
+旧版 `docker-quickstart.sh` 脚本仍然保留，方便使用；但上面的四条命令正是它实际执行的内容，出问题时也更容易排查。
 
-The container persists everything to `./data/` on the host. Back that
-directory up.
+容器会把所有数据持久化到主机上的 `./data/`。请备份该目录。
 
-## Native build (development)
+## 原生构建（开发）
 
-Prerequisites: Go 1.22+, Node 20+, gcc/clang (for CGO).
+前置要求：Go 1.22+、Node 20+、gcc/clang（用于 CGO）。
 
 ```sh
-# Easiest: the Makefile knows about FTS5 build tags and the webdist copy.
+# 最简单方式：Makefile 已经处理好 FTS5 构建标签和 webdist 复制。
 make build
 ./bookfree-server
 ```
 
-If you can't run `make`, the equivalent commands are:
+如果无法使用 `make`，等价命令如下：
 
 ```sh
-# 1. SPA bundle.
+# 1. 构建 SPA 包。
 cd apps/web
 npm install
 npm run build
 cd ../..
 
-# 2. Copy the bundle into the Go embed directory.
+# 2. 将前端构建产物复制到 Go 的嵌入目录。
 rm -rf server/webdist/assets server/webdist/index.html server/webdist/robots.txt
 cp -r apps/web/dist/. server/webdist/
 
-# 3. Build the Go binary. The build tags are MANDATORY — without
-#    `sqlite_fts5` the search migration will fail at boot.
+# 3. 构建 Go 二进制文件。构建标签是必须的；
+#    如果没有 `sqlite_fts5`，搜索迁移会在启动时失败。
 cd server
 GOPROXY=direct GOSUMDB=off CGO_ENABLED=1 \
   go build \
@@ -80,88 +69,82 @@ GOPROXY=direct GOSUMDB=off CGO_ENABLED=1 \
     ./cmd/bookfree
 cd ..
 
-# 4. Run.
+# 4. 运行。
 BOOKFREE_APP_SECRET=$(openssl rand -hex 32) \
 BOOKFREE_DB_URL='file:./data/bookfree.db' \
 BOOKFREE_STORAGE_DIR=./data/storage \
 ./bookfree-server
 ```
 
-## Environment variables
+## 环境变量
 
-| Variable                       | Default                       | Notes |
-|--------------------------------|-------------------------------|-------|
-| `BOOKFREE_APP_SECRET`          | —                             | Required in production. 32+ char hex. |
-| `BOOKFREE_ENV`                 | `development`                 | Set to `production` for hardened defaults. |
-| `BOOKFREE_ADDR`                | `127.0.0.1:3001`              | `0.0.0.0:8788` in the Docker image. |
-| `BOOKFREE_DB_URL`              | `file:./data/bookfree.db`     | Local SQLite only in this build. |
-| `BOOKFREE_STORAGE_DIR`         | `./data/storage`              | Where book files live. |
-| `BOOKFREE_MAX_UPLOAD_SIZE_MB`  | `100`                         | Upload cap. Docker image sets `200`. |
-| `BOOKFREE_ALLOW_REGISTRATION`  | off in production             | `1` to enable self-serve signup. |
-| `BOOKFREE_TRUSTED_PROXIES`     | empty                         | Comma-separated CIDRs / IPs whose `X-Forwarded-For` / `X-Real-IP` are honoured. **Forwarded headers are ignored when this is empty** — set it when running behind Caddy / Nginx / Traefik. |
-| `BOOKFREE_LOG_LEVEL`           | `info`                        | `debug` / `info` / `warn` / `error`. |
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BOOKFREE_APP_SECRET` | — | 生产环境必填。32 位以上十六进制字符。 |
+| `BOOKFREE_ENV` | `development` | 设置为 `production` 可启用更严格的安全默认值。 |
+| `BOOKFREE_ADDR` | `127.0.0.1:3001` | Docker 镜像中为 `0.0.0.0:8788`。 |
+| `BOOKFREE_DB_URL` | `file:./data/bookfree.db` | 当前构建仅支持本地 SQLite。 |
+| `BOOKFREE_STORAGE_DIR` | `./data/storage` | 书籍文件存放目录。 |
+| `BOOKFREE_MAX_UPLOAD_SIZE_MB` | `100` | 上传大小限制。Docker 镜像设置为 `200`。 |
+| `BOOKFREE_ALLOW_REGISTRATION` | 生产环境默认关闭 | 设置为 `1` 可启用自助注册。 |
+| `BOOKFREE_TRUSTED_PROXIES` | 空 | 逗号分隔的 CIDR/IP 列表；这些代理的 `X-Forwarded-For` / `X-Real-IP` 会被信任。**为空时会忽略转发头**，在 Caddy / Nginx / Traefik 后运行时请设置。 |
+| `BOOKFREE_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`。 |
 
-Legacy `QS_MASTER_SECRET`, `APP_SECRET`, `NEXTAUTH_SECRET`,
-`SESSION_SECRET`, `QS_CONFIG_SECRET` are still accepted as
-fallback aliases for `BOOKFREE_APP_SECRET`.
+旧版 `QS_MASTER_SECRET`、`APP_SECRET`、`NEXTAUTH_SECRET`、`SESSION_SECRET`、`QS_CONFIG_SECRET` 仍会作为 `BOOKFREE_APP_SECRET` 的回退别名被接受。
 
-## Subcommands
+## 子命令
 
 ```sh
-./bookfree-server                     # serve (default)
-./bookfree-server migrate             # apply pending migrations and exit
-./bookfree-server backfill-fts        # populate FTS5 from existing rows
-./bookfree-server make-admin <email>  # promote a user to role=admin
+./bookfree-server                     # 启动服务（默认）
+./bookfree-server migrate             # 应用待执行迁移后退出
+./bookfree-server backfill-fts        # 用现有数据填充 FTS5
+./bookfree-server make-admin <email>  # 将用户提升为 role=admin
 ./bookfree-server version
 ./bookfree-server help
 ```
 
-## Architecture
+## 架构
 
 ```
 bookfree/
-├── apps/web/                Vite + React + Tailwind SPA.
-│   ├── src/pages/           Route components.
-│   ├── src/reader/          TXT / EPUB / PDF reader implementations.
-│   ├── src/parsers/         Web-Worker-friendly TXT/EPUB → ingest.
-│   └── public/              Static (robots.txt etc.) — Vite copies into dist/.
+├── apps/web/                Vite + React + Tailwind 单页应用。
+│   ├── src/pages/           路由页面组件。
+│   ├── src/reader/          TXT / EPUB / PDF 阅读器实现。
+│   ├── src/parsers/         适合 Web Worker 的 TXT/EPUB → 导入解析。
+│   └── public/              静态文件（robots.txt 等）— Vite 会复制到 dist/。
 └── server/
-    ├── cmd/bookfree/        Entrypoint + subcommands.
+    ├── cmd/bookfree/        入口点和子命令。
     └── internal/
-        ├── auth/            Sessions, login/register/me, dummy-bcrypt timing-safe.
-        ├── books/           List / get / delete (with file cleanup) / upload (streaming).
-        ├── chapters/        Chapter list + body fetcher.
-        ├── config/          Env loader with legacy fallback chain.
-        ├── db/              *sql.DB with PRAGMAs encoded in the DSN.
-        ├── health/          GET /api/health (HTTP 503 on fail).
-        ├── http/            Router, middleware, rate limit, trusted-proxy IP.
-        ├── ingest/          POST /api/books/{id}/ingest — receives parsed chapters/chunks.
-        ├── notes/           Highlights + notes API.
-        ├── progress/        Reading progress upsert.
-        ├── search/          FTS5 query handler + CJK bigram tokenizer.
-        ├── security/        AES-GCM, scrypt, bcrypt — JS-compat.
-        └── storage/         Storage interface + local FS driver.
+        ├── auth/            会话、登录/注册/me、dummy-bcrypt 防时序攻击。
+        ├── books/           列表 / 获取 / 删除（含文件清理）/ 上传（流式）。
+        ├── chapters/        章节列表和正文获取。
+        ├── config/          环境变量加载器，带旧配置回退链。
+        ├── db/              使用 DSN 编码 PRAGMA 的 *sql.DB。
+        ├── health/          GET /api/health（失败时返回 HTTP 503）。
+        ├── http/            路由、中间件、限流、可信代理 IP。
+        ├── ingest/          POST /api/books/{id}/ingest — 接收解析后的章节/分块。
+        ├── notes/           高亮和笔记 API。
+        ├── progress/        阅读进度 upsert。
+        ├── search/          FTS5 查询处理器和 CJK bigram 分词器。
+        ├── security/        AES-GCM、scrypt、bcrypt — 与 JS 兼容。
+        └── storage/         存储接口和本地文件系统驱动。
 ```
 
-## Memory
+## 内存
 
-Idle RSS ~32 MB. A 50 MB streaming upload still ~32 MB (bytes go
-straight to disk in 32 KiB chunks; nothing is buffered).
+空闲 RSS 约 32 MB。50 MB 的流式上传仍约 32 MB（字节直接以 32 KiB 分块写入磁盘，不在内存中缓冲）。
 
-## What's not in this build
+## 当前构建未包含的内容
 
-The following are deliberately omitted from the current scope and
-would each be substantial additions:
+以下内容有意不在当前范围内，且每一项都需要较大开发量：
 
-- AI chat / RAG / citations
-- MOBI / AZW / AZW3 / FB2 / FBZ / CBZ parsing (uploads accept these
-  formats; they're stored and downloadable but not paginated in the
-  reader yet)
-- Foliate-based EPUB rendering
-- Admin UI (the CLI is the only management surface today)
-- OAuth provisioning
-- Stats — the page exists, but the data is best-effort
+- AI 聊天 / RAG / 引文
+- MOBI / AZW / AZW3 / FB2 / FBZ / CBZ 解析（上传接受这些格式；它们会被存储并可下载，但阅读器中尚未分页显示）
+- 基于 Foliate 的 EPUB 渲染
+- 管理员 UI（目前 CLI 是唯一管理入口）
+- OAuth 配置
+- 统计 — 页面存在，但数据是尽力而为
 
-## License
+## 许可证
 
-Inherits the upstream project's license.
+继承上游项目的许可证。
