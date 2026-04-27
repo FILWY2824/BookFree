@@ -13,7 +13,7 @@
 
 import { useRef, useState } from 'react';
 import { api, ApiException } from '../lib/api';
-import { parseFile } from '../parsers';
+import { parseFile, type ParsedFormat } from '../parsers';
 import { useToast } from './Toast';
 
 interface Props {
@@ -28,7 +28,17 @@ interface UploadResult {
   status: string;
 }
 
-const ACCEPT = '.epub,.pdf,.txt';
+// Formats accepted by the file picker. Must stay in sync with the
+// server's SupportedFormats list (server/internal/books/upload.go).
+// Anything in this list either has a client-side parser (everything
+// except PDF) or renders directly from the original bytes (PDF only).
+const ACCEPT = '.epub,.pdf,.txt,.fb2,.fbz,.mobi,.azw,.azw3,.cbz';
+
+const PARSED_FORMATS: ParsedFormat[] = ['txt', 'epub', 'fb2', 'fbz', 'mobi', 'azw', 'azw3', 'cbz'];
+
+function isParsedFormat(f: string): f is ParsedFormat {
+  return (PARSED_FORMATS as string[]).includes(f);
+}
 
 export default function UploadButton({ onUploaded, variant = 'primary' }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -86,7 +96,7 @@ export default function UploadButton({ onUploaded, variant = 'primary' }: Props)
       return;
     }
 
-    if (format !== 'epub' && format !== 'txt') {
+    if (!isParsedFormat(format)) {
       // Stored, but no parser path. Library will show as "uploaded".
       toast.info(`已上传 ${format.toUpperCase()}（暂不支持解析，文件已保存）`);
       setBusy(null);
@@ -97,7 +107,7 @@ export default function UploadButton({ onUploaded, variant = 'primary' }: Props)
     setBusy({ name: file.name, phase: '解析中' });
     let parsed;
     try {
-      parsed = await parseFile(file, format as 'epub' | 'txt');
+      parsed = await parseFile(file, format);
     } catch (err) {
       const m = (err as Error).message ?? '未知错误';
       toast.error('解析失败：' + m);

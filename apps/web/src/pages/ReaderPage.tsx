@@ -15,6 +15,7 @@ import TocDrawer from '../components/TocDrawer';
 import TxtReader from '../reader/TxtReader';
 import EpubReader from '../reader/EpubReader';
 import PdfReader from '../reader/PdfReader';
+import CbzReader from '../reader/CbzReader';
 
 interface BookDTO {
   id: string;
@@ -86,10 +87,12 @@ export default function ReaderPage() {
   }, [book]);
 
   // Load the chapter list once we know the book — needed by the TOC
-  // drawer for both EPUB and TXT. PDF books skip this; their "TOC" is
-  // page numbers handled inside PdfReader.
+  // drawer for EPUB and any chapter-text-backed format (TXT/MOBI/FB2/...).
+  // PDF skips this; its "TOC" is page numbers handled inside PdfReader.
+  // CBZ skips this too — CbzReader fetches the page list itself so it
+  // can keep the list scoped to the page-flip widget.
   useEffect(() => {
-    if (!book || book.format === 'pdf') return;
+    if (!book || book.format === 'pdf' || book.format === 'cbz') return;
     let cancelled = false;
     api.get<{ chapters: Chapter[] }>(`/api/books/${book.id}/chapters/list`)
       .then(d => { if (!cancelled) setChapters(d.chapters); })
@@ -111,7 +114,18 @@ export default function ReaderPage() {
 
   const isPDF = book?.format === 'pdf';
   const isEPUB = book?.format === 'epub';
-  const cantParse = book && book.format !== 'pdf' && book.format !== 'epub' && book.format !== 'txt';
+  const isCBZ = book?.format === 'cbz';
+  // Formats served by the chapter/chunk-based TxtReader. It consumes
+  // book_chapters rows regardless of source format, so MOBI/AZW/AZW3/
+  // FB2/FBZ all flow through here once foliate-js has populated the
+  // chapters table during ingest.
+  const TXT_BACKED_FORMATS = ['txt', 'fb2', 'fbz', 'mobi', 'azw', 'azw3'];
+  const isTxtBacked = !!book && TXT_BACKED_FORMATS.includes(book.format);
+  // cantParse is reserved for formats we accept on upload but can't
+  // render. Currently every supported format has a viewer — this is
+  // a guard for future formats where ingest succeeds but we don't
+  // ship a renderer yet.
+  const cantParse = !!book && !isPDF && !isEPUB && !isCBZ && !isTxtBacked;
 
   const headerTitle = useMemo(() => {
     if (!book) return '';
@@ -193,7 +207,15 @@ export default function ReaderPage() {
           />
         )}
 
-        {!cantParse && !isPDF && !isEPUB && (
+        {!cantParse && isCBZ && (
+          <CbzReader
+            bookId={book.id}
+            chapterOrd={chapterOrd}
+            onChapterChange={n => setChapterOrd(Math.max(0, n))}
+          />
+        )}
+
+        {!cantParse && isTxtBacked && (
           <TxtReader
             bookId={book.id}
             prefs={prefs}

@@ -7,20 +7,26 @@
 //     chunks:   [{ id, chapterId?, chapterOrd?, ord, text }],
 //   }
 //
-// `id` values are short UUID-ish strings — the server doesn't care what
-// format they take, it just needs them to be unique within the book
-// and stable enough that chunk → chapter cross-refs survive a round
-// trip.
+// Implementation strategy:
+// - TXT we parse ourselves (encoding sniff + chapter-marker regex).
+// - PDF we don't ingest text — pdf.js renders the original file
+//   directly and the search index stays empty for PDFs (this is the
+//   same behavior as before). Search not finding text inside a PDF
+//   is the lesser evil compared to a 200MB pdf.js text-extraction
+//   pass for every upload.
+// - EPUB / MOBI / AZW / AZW3 / FB2 / FBZ / CBZ all go through
+//   foliate-js. It's the same library that powers the Foliate desktop
+//   reader, so its parsers handle the things our hand-rolled code got
+//   wrong: encoding detection, NCX/nav TOCs, KF8 HUFF/CDIC, FB2
+//   footnotes, ComicInfo metadata.
 //
 // CHUNKING POLICY (shared across formats):
 // We split each chapter's plain text into ~1000-char chunks, breaking
 // at paragraph or sentence boundaries when possible. The chunk size is
-// the granularity at which FTS5 returns matches in /api/search, so we
-// want chunks small enough to give the user precise hits but large
-// enough that highly relevant text isn't fragmented across many rows.
+// the granularity at which FTS5 returns matches in /api/search.
 
 import { parseTxt } from './txt';
-import { parseEpub } from './epub';
+import { parseWithFoliate, type ParserFormat } from './foliate';
 
 export interface ChapterIn {
   id: string;
@@ -48,13 +54,21 @@ export interface IngestPayload {
   chunks: ChunkIn[];
 }
 
-export async function parseFile(file: File, format: 'txt' | 'epub'): Promise<IngestPayload> {
+// Formats that produce ingest payloads on the client. PDF skips this
+// path entirely (pdf.js renders the original file, no chapters stored).
+export type ParsedFormat = 'txt' | ParserFormat;
+
+const FOLIATE_FORMATS: ParserFormat[] = ['epub', 'fb2', 'fbz', 'mobi', 'azw', 'azw3', 'cbz'];
+
+export async function parseFile(file: File, format: ParsedFormat): Promise<IngestPayload> {
   if (format === 'txt') return parseTxt(file);
-  if (format === 'epub') return parseEpub(file);
+  if ((FOLIATE_FORMATS as string[]).includes(format)) {
+    return parseWithFoliate(file, format as ParserFormat);
+  }
   throw new Error(`unsupported format: ${format}`);
 }
 
-// ── shared helpers (used by both txt and epub parsers) ───────────────
+// ── shared helpers (used by parsers and the foliate adapter) ─────────
 
 let counter = 0;
 export function shortId(prefix: string): string {

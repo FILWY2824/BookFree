@@ -27,3 +27,5 @@
 .clinerules/
 
 /test_book/
+
+*.patch

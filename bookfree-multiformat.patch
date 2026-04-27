@@ -1,0 +1,1175 @@
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/package.json BookFree-fixed/apps/web/package.json
+--- BookFree-main/apps/web/package.json	2026-04-27 12:06:41.000000000 +0000
++++ BookFree-fixed/apps/web/package.json	2026-04-27 13:02:23.837447535 +0000
+@@ -11,8 +11,10 @@
+     "typecheck": "tsc --noEmit"
+   },
+   "dependencies": {
++    "@zip.js/zip.js": "^2.8.26",
+     "epubjs": "^0.3.93",
+-    "jszip": "^3.10.1",
++    "fflate": "^0.8.2",
++    "foliate-js": "^1.0.1",
+     "pdfjs-dist": "4.7.76",
+     "react": "^18.3.1",
+     "react-dom": "^18.3.1",
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/src/components/UploadButton.tsx BookFree-fixed/apps/web/src/components/UploadButton.tsx
+--- BookFree-main/apps/web/src/components/UploadButton.tsx	2026-04-27 12:06:41.000000000 +0000
++++ BookFree-fixed/apps/web/src/components/UploadButton.tsx	2026-04-27 12:50:18.547440307 +0000
+@@ -13,7 +13,7 @@
+ 
+ import { useRef, useState } from 'react';
+ import { api, ApiException } from '../lib/api';
+-import { parseFile } from '../parsers';
++import { parseFile, type ParsedFormat } from '../parsers';
+ import { useToast } from './Toast';
+ 
+ interface Props {
+@@ -28,7 +28,17 @@
+   status: string;
+ }
+ 
+-const ACCEPT = '.epub,.pdf,.txt';
++// Formats accepted by the file picker. Must stay in sync with the
++// server's SupportedFormats list (server/internal/books/upload.go).
++// Anything in this list either has a client-side parser (everything
++// except PDF) or renders directly from the original bytes (PDF only).
++const ACCEPT = '.epub,.pdf,.txt,.fb2,.fbz,.mobi,.azw,.azw3,.cbz';
++
++const PARSED_FORMATS: ParsedFormat[] = ['txt', 'epub', 'fb2', 'fbz', 'mobi', 'azw', 'azw3', 'cbz'];
++
++function isParsedFormat(f: string): f is ParsedFormat {
++  return (PARSED_FORMATS as string[]).includes(f);
++}
+ 
+ export default function UploadButton({ onUploaded, variant = 'primary' }: Props) {
+   const inputRef = useRef<HTMLInputElement>(null);
+@@ -86,7 +96,7 @@
+       return;
+     }
+ 
+-    if (format !== 'epub' && format !== 'txt') {
++    if (!isParsedFormat(format)) {
+       // Stored, but no parser path. Library will show as "uploaded".
+       toast.info(`已上传 ${format.toUpperCase()}（暂不支持解析，文件已保存）`);
+       setBusy(null);
+@@ -97,7 +107,7 @@
+     setBusy({ name: file.name, phase: '解析中' });
+     let parsed;
+     try {
+-      parsed = await parseFile(file, format as 'epub' | 'txt');
++      parsed = await parseFile(file, format);
+     } catch (err) {
+       const m = (err as Error).message ?? '未知错误';
+       toast.error('解析失败：' + m);
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/src/lib/api.ts BookFree-fixed/apps/web/src/lib/api.ts
+--- BookFree-main/apps/web/src/lib/api.ts	2026-04-27 12:06:41.000000000 +0000
++++ BookFree-fixed/apps/web/src/lib/api.ts	2026-04-27 12:47:21.019438557 +0000
+@@ -105,17 +105,24 @@
+   delete: <T>(path: string, signal?: AbortSignal) =>
+     apiRequest<T>(path, { method: 'DELETE', signal }),
+ 
+-  // putRaw is for streaming uploads (PUT /api/books/upload). Pass a
+-  // File or Blob; we add the bookfree filename header for you.
+-  putRaw: <T>(path: string, body: Blob | ArrayBuffer, filename: string, signal?: AbortSignal) =>
+-    apiRequest<T>(path, {
++  // putRaw is for streaming uploads (PUT /api/books/upload). The
++  // filename is sent as a URL query param rather than a header,
++  // because HTTP headers must be ASCII (RFC 7230 §3.2.4) — non-ASCII
++  // names like "红楼梦.epub" make `fetch` either throw a TypeError
++  // (Chrome/Safari) or send a garbled latin-1 encoding (Firefox).
++  // The server's upload handler already reads `?filename=` as a
++  // fallback (see books/upload.go), so this is purely a transport fix.
++  putRaw: <T>(path: string, body: Blob | ArrayBuffer, filename: string, signal?: AbortSignal) => {
++    const sep = path.includes('?') ? '&' : '?';
++    const url = `${path}${sep}filename=${encodeURIComponent(filename)}`;
++    return apiRequest<T>(url, {
+       method: 'PUT',
+       body: body as unknown,
+       rawBody: true,
+       headers: {
+-        'x-bookfree-filename': filename,
+         'Content-Type': body instanceof Blob && body.type ? body.type : 'application/octet-stream',
+       },
+       signal,
+-    }),
++    });
++  },
+ };
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/src/pages/ReaderPage.tsx BookFree-fixed/apps/web/src/pages/ReaderPage.tsx
+--- BookFree-main/apps/web/src/pages/ReaderPage.tsx	2026-04-27 12:06:41.000000000 +0000
++++ BookFree-fixed/apps/web/src/pages/ReaderPage.tsx	2026-04-27 12:51:30.092441012 +0000
+@@ -15,6 +15,7 @@
+ import TxtReader from '../reader/TxtReader';
+ import EpubReader from '../reader/EpubReader';
+ import PdfReader from '../reader/PdfReader';
++import CbzReader from '../reader/CbzReader';
+ 
+ interface BookDTO {
+   id: string;
+@@ -86,10 +87,12 @@
+   }, [book]);
+ 
+   // Load the chapter list once we know the book — needed by the TOC
+-  // drawer for both EPUB and TXT. PDF books skip this; their "TOC" is
+-  // page numbers handled inside PdfReader.
++  // drawer for EPUB and any chapter-text-backed format (TXT/MOBI/FB2/...).
++  // PDF skips this; its "TOC" is page numbers handled inside PdfReader.
++  // CBZ skips this too — CbzReader fetches the page list itself so it
++  // can keep the list scoped to the page-flip widget.
+   useEffect(() => {
+-    if (!book || book.format === 'pdf') return;
++    if (!book || book.format === 'pdf' || book.format === 'cbz') return;
+     let cancelled = false;
+     api.get<{ chapters: Chapter[] }>(`/api/books/${book.id}/chapters/list`)
+       .then(d => { if (!cancelled) setChapters(d.chapters); })
+@@ -111,7 +114,18 @@
+ 
+   const isPDF = book?.format === 'pdf';
+   const isEPUB = book?.format === 'epub';
+-  const cantParse = book && book.format !== 'pdf' && book.format !== 'epub' && book.format !== 'txt';
++  const isCBZ = book?.format === 'cbz';
++  // Formats served by the chapter/chunk-based TxtReader. It consumes
++  // book_chapters rows regardless of source format, so MOBI/AZW/AZW3/
++  // FB2/FBZ all flow through here once foliate-js has populated the
++  // chapters table during ingest.
++  const TXT_BACKED_FORMATS = ['txt', 'fb2', 'fbz', 'mobi', 'azw', 'azw3'];
++  const isTxtBacked = !!book && TXT_BACKED_FORMATS.includes(book.format);
++  // cantParse is reserved for formats we accept on upload but can't
++  // render. Currently every supported format has a viewer — this is
++  // a guard for future formats where ingest succeeds but we don't
++  // ship a renderer yet.
++  const cantParse = !!book && !isPDF && !isEPUB && !isCBZ && !isTxtBacked;
+ 
+   const headerTitle = useMemo(() => {
+     if (!book) return '';
+@@ -193,7 +207,15 @@
+           />
+         )}
+ 
+-        {!cantParse && !isPDF && !isEPUB && (
++        {!cantParse && isCBZ && (
++          <CbzReader
++            bookId={book.id}
++            chapterOrd={chapterOrd}
++            onChapterChange={n => setChapterOrd(Math.max(0, n))}
++          />
++        )}
++
++        {!cantParse && isTxtBacked && (
+           <TxtReader
+             bookId={book.id}
+             prefs={prefs}
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/src/parsers/epub.ts BookFree-fixed/apps/web/src/parsers/epub.ts
+--- BookFree-main/apps/web/src/parsers/epub.ts	2026-04-27 12:06:41.000000000 +0000
++++ BookFree-fixed/apps/web/src/parsers/epub.ts	1970-01-01 00:00:00.000000000 +0000
+@@ -1,206 +0,0 @@
+-// EPUB parser. We use JSZip directly rather than epubjs for the parse
+-// step because epubjs is geared toward rendering and pulls in a stack
+-// of HTML iframe + CFI machinery we don't need for ingest.
+-//
+-// What we do:
+-//  1. Open the .epub as a zip.
+-//  2. Find META-INF/container.xml → it points to the OPF file.
+-//  3. Read the OPF: title, language, creator, manifest items, spine.
+-//  4. For each spine item, fetch its HTML, normalise <a href=> /
+-//     <img src=> against the OPF's base path, strip junk, and emit
+-//     it as a chapter. We collect plain text alongside for chunking.
+-//  5. Build the chunk list from the chapters' plain text.
+-//
+-// We don't decrypt encrypted EPUBs (EAdobe DRM, etc.). Those throw
+-// from this function and the caller surfaces a "解析失败" toast.
+-
+-import JSZip from 'jszip';
+-import { type ChapterIn, type ChunkIn, type IngestPayload, chunkText, htmlToText, shortId } from './index';
+-
+-export async function parseEpub(file: File): Promise<IngestPayload> {
+-  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+-
+-  if (zip.files['META-INF/encryption.xml']) {
+-    // Many publishers ship font-mangling tokens here too — that's OK.
+-    // The hard fail is the ContentEncryption variety.
+-    const enc = await zip.files['META-INF/encryption.xml'].async('string') as string;
+-    if (/ContentEncryption|PRH-EBC/i.test(enc)) {
+-      throw new Error('EPUB 受 DRM 保护，无法解析');
+-    }
+-  }
+-
+-  const containerXML = await readText(zip, 'META-INF/container.xml');
+-  if (!containerXML) throw new Error('EPUB 缺少 container.xml');
+-  const opfPath = matchAttr(containerXML, /<rootfile[^>]+full-path="([^"]+)"/);
+-  if (!opfPath) throw new Error('EPUB container.xml 无 rootfile');
+-
+-  const opfXML = await readText(zip, opfPath);
+-  if (!opfXML) throw new Error('EPUB 缺少 OPF 文件：' + opfPath);
+-
+-  const basePath = opfPath.includes('/') ? opfPath.replace(/\/[^/]+$/, '/') : '';
+-
+-  const meta = parseOPFMeta(opfXML);
+-  const manifest = parseManifest(opfXML);
+-  const spine = parseSpine(opfXML);
+-
+-  const chapterIns: ChapterIn[] = [];
+-  const chunkIns: ChunkIn[] = [];
+-  let chunkOrd = 0;
+-
+-  for (let i = 0; i < spine.length; i++) {
+-    const idref = spine[i];
+-    const item = manifest[idref];
+-    if (!item) continue;
+-    if (!item.mediaType.includes('html') && !item.mediaType.includes('xml')) continue;
+-
+-    const path = normalizePath(basePath + item.href);
+-    const html = await readText(zip, path);
+-    if (!html) continue;
+-
+-    const cleaned = sanitizeHTML(html);
+-    const text = htmlToText(html);
+-    const title = guessChapterTitle(html) || `第 ${i + 1} 章`;
+-
+-    const cid = shortId('c');
+-    chapterIns.push({
+-      id: cid,
+-      ord: i,
+-      title,
+-      href: item.href,
+-      html: cleaned,
+-      text,
+-    });
+-    for (const piece of chunkText(text)) {
+-      if (piece.length < 8) continue; // skip tiny chunks (e.g. cover-only pages)
+-      chunkIns.push({
+-        id: shortId('k'),
+-        chapterId: cid,
+-        chapterOrd: i,
+-        ord: chunkOrd++,
+-        text: piece,
+-      });
+-    }
+-  }
+-
+-  return {
+-    title: meta.title,
+-    authors: meta.authors,
+-    language: meta.language,
+-    publisher: meta.publisher,
+-    chapters: chapterIns,
+-    chunks: chunkIns,
+-  };
+-}
+-
+-// ── helpers ──────────────────────────────────────────────────────────
+-
+-async function readText(zip: JSZip, path: string): Promise<string> {
+-  const f = zip.file(path);
+-  if (!f) return '';
+-  return (await f.async('string')) as string;
+-}
+-
+-function matchAttr(xml: string, re: RegExp): string {
+-  const m = re.exec(xml);
+-  return m ? m[1] : '';
+-}
+-
+-interface OPFMeta {
+-  title: string;
+-  authors: string[];
+-  language?: string;
+-  publisher?: string;
+-}
+-
+-function parseOPFMeta(opfXML: string): OPFMeta {
+-  const title = textOfFirstTag(opfXML, 'dc:title') ||
+-                textOfFirstTag(opfXML, 'title') || '';
+-  const language = textOfFirstTag(opfXML, 'dc:language') ||
+-                   textOfFirstTag(opfXML, 'language') || undefined;
+-  const publisher = textOfFirstTag(opfXML, 'dc:publisher') ||
+-                    textOfFirstTag(opfXML, 'publisher') || undefined;
+-  // <dc:creator>Author Name</dc:creator> can appear multiple times.
+-  const authors: string[] = [];
+-  const re = /<dc:creator[^>]*>([\s\S]*?)<\/dc:creator>/gi;
+-  let m: RegExpExecArray | null;
+-  while ((m = re.exec(opfXML))) {
+-    const a = htmlToText(m[1]).trim();
+-    if (a) authors.push(a);
+-  }
+-  return { title: title.trim(), authors, language, publisher };
+-}
+-
+-function textOfFirstTag(xml: string, tag: string): string {
+-  const re = new RegExp('<' + escapeRe(tag) + '\\b[^>]*>([\\s\\S]*?)</' + escapeRe(tag) + '>', 'i');
+-  const m = re.exec(xml);
+-  return m ? htmlToText(m[1]) : '';
+-}
+-
+-interface ManifestItem {
+-  href: string;
+-  mediaType: string;
+-}
+-
+-function parseManifest(opfXML: string): Record<string, ManifestItem> {
+-  const out: Record<string, ManifestItem> = {};
+-  const re = /<item\s+([^>]+?)\/?>/gi;
+-  let m: RegExpExecArray | null;
+-  while ((m = re.exec(opfXML))) {
+-    const attrs = m[1];
+-    const id = matchAttr(attrs, /\bid="([^"]+)"/);
+-    const href = matchAttr(attrs, /\bhref="([^"]+)"/);
+-    const mt = matchAttr(attrs, /\bmedia-type="([^"]+)"/);
+-    if (id && href) out[id] = { href, mediaType: mt };
+-  }
+-  return out;
+-}
+-
+-function parseSpine(opfXML: string): string[] {
+-  const spineMatch = /<spine\b[^>]*>([\s\S]*?)<\/spine>/i.exec(opfXML);
+-  if (!spineMatch) return [];
+-  const re = /<itemref\s+([^>]+?)\/?>/gi;
+-  const out: string[] = [];
+-  let m: RegExpExecArray | null;
+-  while ((m = re.exec(spineMatch[1]))) {
+-    const idref = matchAttr(m[1], /\bidref="([^"]+)"/);
+-    if (idref) out.push(idref);
+-  }
+-  return out;
+-}
+-
+-function normalizePath(p: string): string {
+-  // Resolve ../ segments.
+-  const parts: string[] = [];
+-  for (const seg of p.split('/')) {
+-    if (seg === '..') parts.pop();
+-    else if (seg && seg !== '.') parts.push(seg);
+-  }
+-  return parts.join('/');
+-}
+-
+-// Strip <script>, <link rel="stylesheet">, inline <style>, <meta http-equiv>.
+-// Leave the rest alone — the reader's .reader-prose CSS handles styling.
+-function sanitizeHTML(html: string): string {
+-  return html
+-    .replace(/<\?xml[^?]*\?>/g, '')
+-    .replace(/<!DOCTYPE[^>]+>/g, '')
+-    .replace(/<script[\s\S]*?<\/script>/gi, '')
+-    .replace(/<style[\s\S]*?<\/style>/gi, '')
+-    .replace(/<link[^>]*>/gi, '')
+-    .replace(/<meta[^>]*>/gi, '')
+-    .replace(/\son\w+="[^"]*"/gi, '')
+-    .replace(/\son\w+='[^']*'/gi, '');
+-}
+-
+-function guessChapterTitle(html: string): string {
+-  // Prefer <h1>/<h2>/<title>.
+-  for (const tag of ['h1', 'h2', 'h3', 'title']) {
+-    const t = textOfFirstTag(html, tag);
+-    if (t) return t.slice(0, 80);
+-  }
+-  return '';
+-}
+-
+-function escapeRe(s: string): string {
+-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+-}
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/src/parsers/foliate.ts BookFree-fixed/apps/web/src/parsers/foliate.ts
+--- BookFree-main/apps/web/src/parsers/foliate.ts	1970-01-01 00:00:00.000000000 +0000
++++ BookFree-fixed/apps/web/src/parsers/foliate.ts	2026-04-27 12:58:26.694445133 +0000
+@@ -0,0 +1,449 @@
++// Unified parser that delegates to foliate-js for every format
++// (https://github.com/johnfactotum/foliate-js, MIT). foliate-js powers
++// the Foliate desktop reader, so its parsers handle the things we
++// don't want to reimplement: encoding detection, NCX/nav TOCs,
++// MOBI HUFF/CDIC and KF8, FB2 footnotes/binaries, ComicInfo metadata.
++//
++// Architecture:
++//
++//   parseBook(file)
++//     ├── isMOBI(file)?              → mobi.MOBI(unzlib).open(file)
++//     ├── zip + cbz extension?       → comic-book.makeComicBook(loader)
++//     ├── zip + .fb2/.fbz?           → fb2.makeFB2(blob inside zip)
++//     ├── zip otherwise?             → epub.EPUB(loader).init()
++//     ├── plain XML / .fb2?          → fb2.makeFB2(file)
++//     └── otherwise                   → throw (txt and pdf go elsewhere)
++//
++// All branches return a foliate "book" object with .metadata,
++// .sections[], and .toc. We then walk sections, extract HTML+text,
++// and convert into our IngestPayload (chapters + chunks).
++//
++// CBZ is special-cased: its sections are image pages, so we don't try
++// to extract searchable text. Each page becomes one chapter with the
++// zip-entry path stored in `href`, and CbzReader uses that path on
++// playback to pull the page from the original file.
++
++import { type IngestPayload, type ChapterIn, type ChunkIn, chunkText, htmlToText, shortId } from './index';
++import { isMOBI, MOBI } from 'foliate-js/mobi.js';
++import { makeFB2 } from 'foliate-js/fb2.js';
++import { makeComicBook } from 'foliate-js/comic-book.js';
++import { EPUB } from 'foliate-js/epub.js';
++import {
++  configure as zipConfigure,
++  ZipReader,
++  BlobReader,
++  TextWriter,
++  BlobWriter,
++} from '@zip.js/zip.js';
++import { unzlibSync } from 'fflate';
++
++// foliate's mobi.js needs unzlib for KF8 fonts. Pass fflate's
++// implementation; it works in browsers and is tiny.
++const MOBI_OPTIONS = { unzlib: unzlibSync };
++
++// ── format detection ─────────────────────────────────────────────────
++
++const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04]; // 'PK\x03\x04'
++
++async function isZip(file: File): Promise<boolean> {
++  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
++  return head[0] === ZIP_MAGIC[0] && head[1] === ZIP_MAGIC[1] &&
++         head[2] === ZIP_MAGIC[2] && head[3] === ZIP_MAGIC[3];
++}
++
++// ── zip loader ───────────────────────────────────────────────────────
++// foliate's epub.js and comic-book.js take a `loader` shaped like:
++//   { entries, loadText(name), loadBlob(name, type?), getSize(name), getComment() }
++// We back it with @zip.js/zip.js because (per foliate's README)
++// it's the only library that supports random access on a Blob — which
++// is what EPUB rendering needs to fetch one resource at a time.
++
++interface ZipLoader {
++  entries: Array<{ filename: string }>;
++  loadText: (name: string) => Promise<string | null>;
++  loadBlob: (name: string, type?: string) => Promise<Blob | null>;
++  getSize: (name: string) => number;
++  getComment: () => Promise<string>;
++}
++
++async function makeZipLoader(file: File): Promise<{ loader: ZipLoader; reader: ZipReader<Blob> }> {
++  // useWebWorkers=false keeps the Vite dev server happy (no extra
++  // worker chunk needed) and avoids a CSP wrinkle for production.
++  zipConfigure({ useWebWorkers: false });
++  const reader = new ZipReader(new BlobReader(file));
++  const entries = await reader.getEntries();
++  const map = new Map<string, (typeof entries)[number]>();
++  for (const e of entries) map.set(e.filename, e);
++
++  const comment = (() => {
++    // zip.js exposes the archive comment on the reader as a Uint8Array.
++    // Some CBZ producers tuck JSON metadata in there; foliate reads it.
++    // Returning '' on absence is fine — foliate guards with try/catch.
++    try {
++      const c = (reader as unknown as { comment?: Uint8Array }).comment;
++      if (!c || c.byteLength === 0) return '';
++      return new TextDecoder('utf-8').decode(c);
++    } catch {
++      return '';
++    }
++  })();
++
++  const loader: ZipLoader = {
++    entries: entries.map(e => ({ filename: e.filename })),
++    loadText: async (name) => {
++      const e = map.get(name);
++      // Skip directory entries (they have no getData) and missing names.
++      if (!e || !('getData' in e) || typeof e.getData !== 'function') return null;
++      return e.getData(new TextWriter()) as Promise<string>;
++    },
++    loadBlob: async (name, type) => {
++      const e = map.get(name);
++      if (!e || !('getData' in e) || typeof e.getData !== 'function') return null;
++      return e.getData(new BlobWriter(type)) as Promise<Blob>;
++    },
++    getSize: (name) => {
++      const e = map.get(name);
++      return e && 'uncompressedSize' in e ? e.uncompressedSize : 0;
++    },
++    getComment: async () => comment,
++  };
++
++  return { loader, reader };
++}
++
++// ── public entry point ──────────────────────────────────────────────
++
++export type ParserFormat = 'epub' | 'fb2' | 'fbz' | 'mobi' | 'azw' | 'azw3' | 'cbz';
++
++export async function parseWithFoliate(file: File, format: ParserFormat): Promise<IngestPayload> {
++  // We dispatch on extension first because the user-facing "format"
++  // already came through the server's magic check; we use it to pick
++  // the parser without re-sniffing the file. CBZ is special — its
++  // ingest payload is structurally different (image pages, no text).
++  if (format === 'cbz') return parseCbzInternal(file);
++  if (format === 'mobi' || format === 'azw' || format === 'azw3') return parseMobiInternal(file);
++
++  const fileIsZip = await isZip(file);
++  if (format === 'fbz' || (format === 'fb2' && fileIsZip)) return parseFbzInternal(file);
++  if (format === 'fb2') return parseFb2Internal(file);
++  if (format === 'epub') return parseEpubInternal(file);
++
++  throw new Error(`unsupported format: ${format}`);
++}
++
++// ── EPUB ─────────────────────────────────────────────────────────────
++
++async function parseEpubInternal(file: File): Promise<IngestPayload> {
++  const { loader, reader } = await makeZipLoader(file);
++  try {
++    const epub = new EPUB(loader);
++    const book = await epub.init() as FoliateBook;
++    return await collectBook(book, file.name, /*isComic=*/false);
++  } finally {
++    await reader.close();
++  }
++}
++
++// ── MOBI / AZW / AZW3 ────────────────────────────────────────────────
++
++async function parseMobiInternal(file: File): Promise<IngestPayload> {
++  if (!(await isMOBI(file))) {
++    throw new Error('文件不是 MOBI/AZW/AZW3（缺少 BOOKMOBI 标识）');
++  }
++  const mobi = new MOBI(MOBI_OPTIONS);
++  // `open` returns either a MOBI6 or KF8 wrapper, both of which expose
++  // the same .sections / .toc / .metadata interface.
++  const book = await mobi.open(file) as FoliateBook;
++  return await collectBook(book, file.name, /*isComic=*/false);
++}
++
++// ── FB2 / FBZ ────────────────────────────────────────────────────────
++
++async function parseFb2Internal(file: File): Promise<IngestPayload> {
++  const book = await makeFB2(file) as FoliateBook;
++  return await collectBook(book, file.name, /*isComic=*/false);
++}
++
++async function parseFbzInternal(file: File): Promise<IngestPayload> {
++  const { loader, reader } = await makeZipLoader(file);
++  try {
++    // Find the inner .fb2 entry. Fall back to the first non-directory
++    // entry if there's no .fb2 (some producers omit the extension).
++    const fb2Entry = loader.entries.find(e => e.filename.toLowerCase().endsWith('.fb2'))
++                  ?? loader.entries[0];
++    if (!fb2Entry) throw new Error('FBZ 内未找到任何文件');
++    const blob = await loader.loadBlob(fb2Entry.filename);
++    if (!blob) throw new Error('FBZ 内 .fb2 文件读取失败');
++    const book = await makeFB2(blob) as FoliateBook;
++    return await collectBook(book, file.name, /*isComic=*/false);
++  } finally {
++    await reader.close();
++  }
++}
++
++// ── CBZ ──────────────────────────────────────────────────────────────
++
++async function parseCbzInternal(file: File): Promise<IngestPayload> {
++  const { loader, reader } = await makeZipLoader(file);
++  try {
++    const book = await makeComicBook(loader, file) as FoliateBook;
++    return await collectComicBook(book, file.name);
++  } finally {
++    await reader.close();
++  }
++}
++
++// ── shared "book → IngestPayload" walker ─────────────────────────────
++//
++// Every foliate format returns the same shape: book.sections[], each
++// with .createDocument(). We walk them, take the document body's
++// HTML, extract a title from headings or TOC, derive plain text, and
++// chunk it for FTS. Sections marked linear="no" (footnotes, etc.) are
++// skipped — they're not part of the reading flow.
++
++interface FoliateSection {
++  id: unknown;
++  load?: () => Promise<string> | string;
++  createDocument?: () => Promise<Document> | Document;
++  size?: number;
++  linear?: string;
++  href?: string;
++}
++
++interface FoliateTocItem {
++  label?: string;
++  href?: string;
++  subitems?: FoliateTocItem[];
++}
++
++interface FoliateBook {
++  sections: FoliateSection[];
++  toc?: FoliateTocItem[];
++  metadata?: {
++    title?: string | { [k: string]: string };
++    author?: unknown;
++    language?: string | string[];
++    publisher?: string | { [k: string]: string };
++  };
++  resolveHref?: (href: string) => { index: number; anchor?: unknown } | null;
++}
++
++async function collectBook(book: FoliateBook, filename: string, isComic: boolean): Promise<IngestPayload> {
++  const meta = extractMetadata(book, filename);
++  const tocByIndex = buildTocIndex(book);
++
++  const chapters: ChapterIn[] = [];
++  const chunks: ChunkIn[] = [];
++  let chunkOrd = 0;
++
++  for (let i = 0; i < book.sections.length; i++) {
++    const sec = book.sections[i];
++    if (!sec) continue;
++    if (sec.linear === 'no' && !isComic) continue; // skip non-linear (footnotes etc.)
++    if (!sec.createDocument) continue;
++
++    let doc: Document;
++    try {
++      doc = await sec.createDocument();
++    } catch (e) {
++      // A single broken section shouldn't kill the whole book — log
++      // and move on. The rest of the book stays readable.
++      console.warn(`section ${i} createDocument failed:`, e);
++      continue;
++    }
++
++    const html = sanitizeBodyHtml(doc);
++    const text = htmlToText(html);
++    if (!isComic && text.trim().length === 0) continue;
++
++    const title = pickChapterTitle(doc, tocByIndex.get(i)) || `第 ${chapters.length + 1} 章`;
++    const cid = shortId('c');
++    chapters.push({
++      id: cid,
++      ord: chapters.length,
++      title,
++      html,
++      text,
++    });
++
++    for (const piece of chunkText(text)) {
++      if (piece.length < 8) continue;
++      chunks.push({
++        id: shortId('k'),
++        chapterId: cid,
++        chapterOrd: chapters.length - 1,
++        ord: chunkOrd++,
++        text: piece,
++      });
++    }
++  }
++
++  if (chapters.length === 0) {
++    throw new Error('未能提取出任何章节内容');
++  }
++
++  return {
++    title: meta.title,
++    authors: meta.authors,
++    language: meta.language,
++    publisher: meta.publisher,
++    chapters,
++    chunks,
++  };
++}
++
++// CBZ produces image pages, not prose, so we don't try to extract
++// searchable text. Each page becomes one chapter; CbzReader fetches
++// the original .cbz at read time and renders the image at chapter.href.
++async function collectComicBook(book: FoliateBook, filename: string): Promise<IngestPayload> {
++  const meta = extractMetadata(book, filename);
++  const chapters: ChapterIn[] = [];
++  const chunks: ChunkIn[] = [];
++
++  // foliate's makeComicBook stores the page filename on section.id.
++  // That's the same name used by the loader, so CbzReader can ask
++  // JSZip (or any zip reader) for it directly.
++  for (let i = 0; i < book.sections.length; i++) {
++    const sec = book.sections[i];
++    if (!sec) continue;
++    const pageTitle = `第 ${i + 1} 页`;
++    const filename = typeof sec.id === 'string' ? sec.id : '';
++    const cid = shortId('c');
++    chapters.push({
++      id: cid,
++      ord: i,
++      title: pageTitle,
++      href: filename,
++      html: `<p class="cbz-placeholder">[${pageTitle}]</p>`,
++      text: `[${pageTitle}]`,
++    });
++    chunks.push({
++      id: shortId('k'),
++      chapterId: cid,
++      chapterOrd: i,
++      ord: i,
++      text: `${pageTitle}（图片页）`,
++    });
++  }
++
++  if (chapters.length === 0) throw new Error('CBZ 内未找到任何图片页');
++
++  return {
++    title: meta.title,
++    authors: meta.authors,
++    language: meta.language,
++    publisher: meta.publisher,
++    chapters,
++    chunks,
++  };
++}
++
++// ── helpers ──────────────────────────────────────────────────────────
++
++function extractMetadata(book: FoliateBook, filename: string) {
++  const m = book.metadata ?? {};
++  const title = pickLocalized(m.title) || stripExt(filename);
++  const authors = normalizeAuthors(m.author);
++  const language = Array.isArray(m.language) ? m.language[0] : m.language;
++  const publisher = pickLocalized(m.publisher) || undefined;
++  return { title, authors, language, publisher };
++}
++
++function pickLocalized(v: unknown): string {
++  if (!v) return '';
++  if (typeof v === 'string') return v.trim();
++  if (typeof v === 'object') {
++    // foliate returns either a string or a {lang: string} map. Pick
++    // the first non-empty value; we don't have a UI locale to honor.
++    for (const k of Object.keys(v as Record<string, string>)) {
++      const val = (v as Record<string, string>)[k];
++      if (typeof val === 'string' && val.trim()) return val.trim();
++    }
++  }
++  return '';
++}
++
++function normalizeAuthors(a: unknown): string[] {
++  if (!a) return [];
++  const arr = Array.isArray(a) ? a : [a];
++  const out: string[] = [];
++  for (const item of arr) {
++    if (typeof item === 'string') {
++      const s = item.trim();
++      if (s) out.push(s);
++    } else if (item && typeof item === 'object') {
++      // {name, sortAs} or a localized object
++      const obj = item as Record<string, unknown>;
++      const name = (typeof obj.name === 'string' ? obj.name : '')
++                || pickLocalized(obj);
++      if (name) out.push(name.trim());
++    }
++  }
++  return out;
++}
++
++// Build a map from section index → preferred TOC label. We resolve
++// each TOC href to a section index via the book's resolveHref, which
++// knows about CFIs (EPUB), filepos URIs (MOBI), and section indices
++// (others). If two TOC entries land on the same section, the first
++// (most prominent) wins.
++function buildTocIndex(book: FoliateBook): Map<number, string> {
++  const out = new Map<number, string>();
++  if (!book.toc || !book.resolveHref) return out;
++  const walk = (items: FoliateTocItem[]) => {
++    for (const it of items) {
++      if (it.href && it.label) {
++        try {
++          const r = book.resolveHref!(it.href);
++          if (r && typeof r.index === 'number' && !out.has(r.index)) {
++            out.set(r.index, it.label.trim().slice(0, 120));
++          }
++        } catch {
++          // resolveHref is best-effort; bad TOC hrefs are common in
++          // the wild (broken toc.ncx, malformed CFIs).
++        }
++      }
++      if (it.subitems) walk(it.subitems);
++    }
++  };
++  walk(book.toc);
++  return out;
++}
++
++// Turn the foliate-loaded Document into a self-contained HTML string
++// for storage. We keep the body's children verbatim — that preserves
++// structure (lists, blockquotes, images-as-recindex placeholders) but
++// strip <script>/<style>/event handlers since the reader's iframe
++// has CSP enabled and those would just be dead weight.
++function sanitizeBodyHtml(doc: Document): string {
++  const body = doc.body ?? doc.documentElement;
++  if (!body) return '';
++  // Remove script/style/link/meta in place — operating on a clone so
++  // we don't mutate the parser's cache (foliate caches Documents).
++  const clone = body.cloneNode(true) as HTMLElement;
++  clone.querySelectorAll('script, style, link, meta').forEach(n => n.remove());
++  // Strip on* handlers from every element.
++  for (const el of Array.from(clone.querySelectorAll('*'))) {
++    for (const a of Array.from(el.attributes)) {
++      if (a.name.toLowerCase().startsWith('on')) el.removeAttribute(a.name);
++    }
++  }
++  return clone.innerHTML;
++}
++
++function pickChapterTitle(doc: Document, tocLabel: string | undefined): string {
++  if (tocLabel) return tocLabel;
++  for (const tag of ['h1', 'h2', 'h3']) {
++    const el = doc.querySelector(tag);
++    const text = el?.textContent?.trim();
++    if (text) return text.slice(0, 120);
++  }
++  const t = doc.querySelector('title')?.textContent?.trim();
++  return t ? t.slice(0, 120) : '';
++}
++
++function stripExt(name: string): string {
++  const dot = name.lastIndexOf('.');
++  if (dot <= 0) return name;
++  return name.slice(0, dot);
++}
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/src/parsers/index.ts BookFree-fixed/apps/web/src/parsers/index.ts
+--- BookFree-main/apps/web/src/parsers/index.ts	2026-04-27 12:06:41.000000000 +0000
++++ BookFree-fixed/apps/web/src/parsers/index.ts	2026-04-27 12:49:57.350440098 +0000
+@@ -7,20 +7,26 @@
+ //     chunks:   [{ id, chapterId?, chapterOrd?, ord, text }],
+ //   }
+ //
+-// `id` values are short UUID-ish strings — the server doesn't care what
+-// format they take, it just needs them to be unique within the book
+-// and stable enough that chunk → chapter cross-refs survive a round
+-// trip.
++// Implementation strategy:
++// - TXT we parse ourselves (encoding sniff + chapter-marker regex).
++// - PDF we don't ingest text — pdf.js renders the original file
++//   directly and the search index stays empty for PDFs (this is the
++//   same behavior as before). Search not finding text inside a PDF
++//   is the lesser evil compared to a 200MB pdf.js text-extraction
++//   pass for every upload.
++// - EPUB / MOBI / AZW / AZW3 / FB2 / FBZ / CBZ all go through
++//   foliate-js. It's the same library that powers the Foliate desktop
++//   reader, so its parsers handle the things our hand-rolled code got
++//   wrong: encoding detection, NCX/nav TOCs, KF8 HUFF/CDIC, FB2
++//   footnotes, ComicInfo metadata.
+ //
+ // CHUNKING POLICY (shared across formats):
+ // We split each chapter's plain text into ~1000-char chunks, breaking
+ // at paragraph or sentence boundaries when possible. The chunk size is
+-// the granularity at which FTS5 returns matches in /api/search, so we
+-// want chunks small enough to give the user precise hits but large
+-// enough that highly relevant text isn't fragmented across many rows.
++// the granularity at which FTS5 returns matches in /api/search.
+ 
+ import { parseTxt } from './txt';
+-import { parseEpub } from './epub';
++import { parseWithFoliate, type ParserFormat } from './foliate';
+ 
+ export interface ChapterIn {
+   id: string;
+@@ -48,13 +54,21 @@
+   chunks: ChunkIn[];
+ }
+ 
+-export async function parseFile(file: File, format: 'txt' | 'epub'): Promise<IngestPayload> {
++// Formats that produce ingest payloads on the client. PDF skips this
++// path entirely (pdf.js renders the original file, no chapters stored).
++export type ParsedFormat = 'txt' | ParserFormat;
++
++const FOLIATE_FORMATS: ParserFormat[] = ['epub', 'fb2', 'fbz', 'mobi', 'azw', 'azw3', 'cbz'];
++
++export async function parseFile(file: File, format: ParsedFormat): Promise<IngestPayload> {
+   if (format === 'txt') return parseTxt(file);
+-  if (format === 'epub') return parseEpub(file);
++  if ((FOLIATE_FORMATS as string[]).includes(format)) {
++    return parseWithFoliate(file, format as ParserFormat);
++  }
+   throw new Error(`unsupported format: ${format}`);
+ }
+ 
+-// ── shared helpers (used by both txt and epub parsers) ───────────────
++// ── shared helpers (used by parsers and the foliate adapter) ─────────
+ 
+ let counter = 0;
+ export function shortId(prefix: string): string {
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/src/reader/CbzReader.tsx BookFree-fixed/apps/web/src/reader/CbzReader.tsx
+--- BookFree-main/apps/web/src/reader/CbzReader.tsx	1970-01-01 00:00:00.000000000 +0000
++++ BookFree-fixed/apps/web/src/reader/CbzReader.tsx	2026-04-27 12:57:48.991444751 +0000
+@@ -0,0 +1,220 @@
++// CbzReader — comic-book viewer for .cbz files.
++//
++// Strategy: stream the original .cbz from /api/books/{id}/file once,
++// open it with zip.js (random-access on the Blob), and render the
++// page at chapterOrd as an <img> using a per-page blob URL. The
++// chapter list — already populated by the cbz parser at ingest time —
++// gives us the zip-entry filename for each page in chapter.href.
++//
++// Memory: one decoded page in flight as a blob URL, revoked on every
++// page change. We rely on zip.js's lazy decoding so we never have
++// the whole archive decompressed at once. On unmount we close the
++// reader and revoke any outstanding URL.
++
++import { useEffect, useMemo, useRef, useState } from 'react';
++import {
++  configure as zipConfigure,
++  ZipReader,
++  BlobReader,
++  BlobWriter,
++  type Entry,
++} from '@zip.js/zip.js';
++import { api } from '../lib/api';
++
++interface Chapter {
++  id: string;
++  ord: number;
++  title?: string | null;
++  href?: string | null;
++}
++
++interface Props {
++  bookId: string;
++  /** Active page (zero-indexed, matches chapterOrd in the parent). */
++  chapterOrd: number;
++  onChapterChange: (ord: number) => void;
++}
++
++// Module-level configure call so we don't reach for Web Workers in
++// dev (Vite's dev server doesn't ship them as separate chunks). The
++// option is idempotent.
++zipConfigure({ useWebWorkers: false });
++
++export default function CbzReader({ bookId, chapterOrd, onChapterChange }: Props) {
++  const [chapters, setChapters] = useState<Chapter[]>([]);
++  const [entries, setEntries] = useState<Map<string, Entry> | null>(null);
++  const [imgUrl, setImgUrl] = useState<string | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(true);
++  const urlRef = useRef<string | null>(null);
++  const readerRef = useRef<ZipReader<Blob> | null>(null);
++
++  // Step 1: load the chapter (page) list. Each chapter's `href` points
++  // at the zip entry inside the original .cbz.
++  useEffect(() => {
++    let cancelled = false;
++    api.get<{ chapters: Chapter[] }>(`/api/books/${bookId}/chapters/list`)
++      .then(d => { if (!cancelled) setChapters(d.chapters); })
++      .catch(e => !cancelled && setError(e.message));
++    return () => { cancelled = true; };
++  }, [bookId]);
++
++  // Step 2: stream and open the .cbz once, keep the entries map.
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    (async () => {
++      try {
++        const res = await fetch(`/api/books/${bookId}/file`, { credentials: 'same-origin' });
++        if (!res.ok) throw new Error(`HTTP ${res.status}`);
++        const blob = await res.blob();
++        if (cancelled) return;
++        const reader = new ZipReader(new BlobReader(blob));
++        readerRef.current = reader;
++        const list = await reader.getEntries();
++        if (cancelled) return;
++        const map = new Map<string, Entry>();
++        for (const e of list) map.set(e.filename, e);
++        setEntries(map);
++      } catch (e) {
++        if (!cancelled) setError((e as Error).message ?? 'CBZ 加载失败');
++      } finally {
++        if (!cancelled) setLoading(false);
++      }
++    })();
++    return () => {
++      cancelled = true;
++      readerRef.current?.close().catch(() => { /* ignore */ });
++      readerRef.current = null;
++    };
++  }, [bookId]);
++
++  // Step 3: whenever the active chapter or zip changes, swap the image.
++  useEffect(() => {
++    if (!entries || chapters.length === 0) return;
++    const ch = chapters[Math.max(0, Math.min(chapters.length - 1, chapterOrd))];
++    if (!ch?.href) {
++      setError('该页缺少图片路径');
++      return;
++    }
++    const entry = entries.get(ch.href);
++    if (!entry || !('getData' in entry) || typeof entry.getData !== 'function') {
++      setError('CBZ 内未找到该图片：' + ch.href);
++      return;
++    }
++    let cancelled = false;
++    (async () => {
++      try {
++        // zip.js's typings are awkward; the runtime accepts a writer
++        // and returns whatever it produces. BlobWriter lets us pass a
++        // mime hint so Safari renders the image without a content-
++        // type sniff round-trip.
++        const blob: Blob = await (entry.getData(new BlobWriter(guessImageMime(ch.href!))) as Promise<Blob>);
++        if (cancelled) return;
++        const url = URL.createObjectURL(blob);
++        // Replace the previous URL after we have a new one to avoid
++        // a flicker between pages.
++        if (urlRef.current) URL.revokeObjectURL(urlRef.current);
++        urlRef.current = url;
++        setImgUrl(url);
++        setError(null);
++      } catch (e) {
++        if (!cancelled) setError('页面解压失败：' + (e as Error).message);
++      }
++    })();
++    return () => { cancelled = true; };
++  }, [entries, chapters, chapterOrd]);
++
++  // Revoke any outstanding blob URL on unmount so we don't leak.
++  useEffect(() => () => {
++    if (urlRef.current) {
++      URL.revokeObjectURL(urlRef.current);
++      urlRef.current = null;
++    }
++  }, []);
++
++  const canPrev = chapterOrd > 0;
++  const canNext = chapterOrd < chapters.length - 1;
++
++  const footerLabel = useMemo(() => {
++    if (chapters.length === 0) return '';
++    return `${chapterOrd + 1} / ${chapters.length}`;
++  }, [chapterOrd, chapters.length]);
++
++  return (
++    <div
++      className="h-full flex flex-col"
++      style={{ background: 'var(--reader-bg)', color: 'var(--reader-fg)' }}
++    >
++      <div className="flex-1 min-h-0 relative overflow-auto">
++        {loading && (
++          <div className="absolute inset-0 flex items-center justify-center" style={{ color: 'var(--reader-muted)' }}>
++            正在打开 CBZ…
++          </div>
++        )}
++        {error && (
++          <div className="absolute inset-0 flex items-center justify-center text-rose-500 px-6 text-center">
++            {error}
++          </div>
++        )}
++        {!loading && !error && imgUrl && (
++          <div className="h-full w-full flex items-start justify-center p-2">
++            <img
++              src={imgUrl}
++              alt={`Page ${chapterOrd + 1}`}
++              className="max-w-full h-auto select-none"
++              draggable={false}
++            />
++          </div>
++        )}
++        {/* Click left/right to flip pages — same gesture as EpubReader. */}
++        <button
++          onClick={() => canPrev && onChapterChange(chapterOrd - 1)}
++          disabled={!canPrev}
++          aria-label="上一页"
++          className="absolute left-0 top-0 h-full w-12 opacity-0 hover:opacity-30 bg-ink-900 transition-opacity disabled:cursor-not-allowed"
++        />
++        <button
++          onClick={() => canNext && onChapterChange(chapterOrd + 1)}
++          disabled={!canNext}
++          aria-label="下一页"
++          className="absolute right-0 top-0 h-full w-12 opacity-0 hover:opacity-30 bg-ink-900 transition-opacity disabled:cursor-not-allowed"
++        />
++      </div>
++      <div
++        className="shrink-0 flex items-center justify-between px-4 h-10 border-t text-sm"
++        style={{ borderColor: 'var(--reader-border)' }}
++      >
++        <button
++          disabled={!canPrev}
++          onClick={() => onChapterChange(chapterOrd - 1)}
++          className="px-2 py-1 rounded disabled:opacity-30"
++        >
++          ← 上一页
++        </button>
++        <span style={{ color: 'var(--reader-muted)' }}>{footerLabel}</span>
++        <button
++          disabled={!canNext}
++          onClick={() => onChapterChange(chapterOrd + 1)}
++          className="px-2 py-1 rounded disabled:opacity-30"
++        >
++          下一页 →
++        </button>
++      </div>
++    </div>
++  );
++}
++
++function guessImageMime(name: string): string {
++  const ext = name.toLowerCase().split('.').pop() ?? '';
++  switch (ext) {
++    case 'jpg':
++    case 'jpeg': return 'image/jpeg';
++    case 'png':  return 'image/png';
++    case 'webp': return 'image/webp';
++    case 'gif':  return 'image/gif';
++    case 'bmp':  return 'image/bmp';
++    case 'avif': return 'image/avif';
++    default:     return 'application/octet-stream';
++  }
++}
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/src/types/foliate-js.d.ts BookFree-fixed/apps/web/src/types/foliate-js.d.ts
+--- BookFree-main/apps/web/src/types/foliate-js.d.ts	1970-01-01 00:00:00.000000000 +0000
++++ BookFree-fixed/apps/web/src/types/foliate-js.d.ts	2026-04-27 12:57:21.253444472 +0000
+@@ -0,0 +1,28 @@
++// Type declarations for foliate-js. The library ships pure JS without
++// .d.ts files. We declare just enough surface area to type-check the
++// thin wrappers in src/parsers/foliate.ts; the wrappers themselves
++// re-shape everything to our own IngestPayload type, so consumers
++// don't see these `any`s.
++
++declare module 'foliate-js/mobi.js' {
++  export const isMOBI: (file: Blob) => Promise<boolean>;
++  export class MOBI {
++    constructor(opts: { unzlib: (data: Uint8Array) => Uint8Array });
++    open(file: Blob): Promise<unknown>;
++  }
++}
++
++declare module 'foliate-js/fb2.js' {
++  export const makeFB2: (blob: Blob) => Promise<unknown>;
++}
++
++declare module 'foliate-js/comic-book.js' {
++  export const makeComicBook: (loader: unknown, file: Blob) => Promise<unknown>;
++}
++
++declare module 'foliate-js/epub.js' {
++  export class EPUB {
++    constructor(loader: unknown);
++    init(): Promise<unknown>;
++  }
++}
+diff -ruN '--exclude=node_modules' '--exclude=package-lock.json' '--exclude=dist' '--exclude=.git' '--exclude=webdist' BookFree-main/apps/web/vite.config.ts BookFree-fixed/apps/web/vite.config.ts
+--- BookFree-main/apps/web/vite.config.ts	2026-04-27 12:06:41.000000000 +0000
++++ BookFree-fixed/apps/web/vite.config.ts	2026-04-27 12:59:35.554445831 +0000
+@@ -16,14 +16,22 @@
+     outDir: 'dist',
+     sourcemap: false,
+     // Code-split aggressively so the initial shell stays small. Reader
+-    // libraries (epub.js, pdf.js) are only loaded when the user opens
+-    // a book of that format.
++    // libraries (epub.js, pdf.js, foliate-js) are only loaded when the
++    // user opens a book of that format, or starts uploading one.
+     rollupOptions: {
+       output: {
+         manualChunks: {
+-          react:  ['react', 'react-dom', 'react-router-dom'],
+-          pdf:    ['pdfjs-dist'],
+-          epub:   ['epubjs', 'jszip'],
++          react:    ['react', 'react-dom', 'react-router-dom'],
++          pdf:      ['pdfjs-dist'],
++          epub:     ['epubjs'],
++          // Parser bundle: foliate-js + the zip/inflate primitives it
++          // needs. This is the chunk that loads when the user picks a
++          // .mobi/.azw/.azw3/.fb2/.fbz/.cbz/.epub file to upload.
++          // Keeping it separate from the rendering chunks (epub, pdf)
++          // means a TXT-only user never pays for it.
++          parsers:  ['foliate-js/mobi.js', 'foliate-js/fb2.js',
++                     'foliate-js/comic-book.js', 'foliate-js/epub.js',
++                     '@zip.js/zip.js', 'fflate'],
+         },
+       },
+     },

@@ -105,17 +105,24 @@ export const api = {
   delete: <T>(path: string, signal?: AbortSignal) =>
     apiRequest<T>(path, { method: 'DELETE', signal }),
 
-  // putRaw is for streaming uploads (PUT /api/books/upload). Pass a
-  // File or Blob; we add the bookfree filename header for you.
-  putRaw: <T>(path: string, body: Blob | ArrayBuffer, filename: string, signal?: AbortSignal) =>
-    apiRequest<T>(path, {
+  // putRaw is for streaming uploads (PUT /api/books/upload). The
+  // filename is sent as a URL query param rather than a header,
+  // because HTTP headers must be ASCII (RFC 7230 §3.2.4) — non-ASCII
+  // names like "红楼梦.epub" make `fetch` either throw a TypeError
+  // (Chrome/Safari) or send a garbled latin-1 encoding (Firefox).
+  // The server's upload handler already reads `?filename=` as a
+  // fallback (see books/upload.go), so this is purely a transport fix.
+  putRaw: <T>(path: string, body: Blob | ArrayBuffer, filename: string, signal?: AbortSignal) => {
+    const sep = path.includes('?') ? '&' : '?';
+    const url = `${path}${sep}filename=${encodeURIComponent(filename)}`;
+    return apiRequest<T>(url, {
       method: 'PUT',
       body: body as unknown,
       rawBody: true,
       headers: {
-        'x-bookfree-filename': filename,
         'Content-Type': body instanceof Blob && body.type ? body.type : 'application/octet-stream',
       },
       signal,
-    }),
+    });
+  },
 };

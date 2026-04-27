@@ -16,14 +16,22 @@ export default defineConfig({
     outDir: 'dist',
     sourcemap: false,
     // Code-split aggressively so the initial shell stays small. Reader
-    // libraries (epub.js, pdf.js) are only loaded when the user opens
-    // a book of that format.
+    // libraries (epub.js, pdf.js, foliate-js) are only loaded when the
+    // user opens a book of that format, or starts uploading one.
     rollupOptions: {
       output: {
         manualChunks: {
-          react:  ['react', 'react-dom', 'react-router-dom'],
-          pdf:    ['pdfjs-dist'],
-          epub:   ['epubjs', 'jszip'],
+          react:    ['react', 'react-dom', 'react-router-dom'],
+          pdf:      ['pdfjs-dist'],
+          epub:     ['epubjs'],
+          // Parser bundle: foliate-js + the zip/inflate primitives it
+          // needs. This is the chunk that loads when the user picks a
+          // .mobi/.azw/.azw3/.fb2/.fbz/.cbz/.epub file to upload.
+          // Keeping it separate from the rendering chunks (epub, pdf)
+          // means a TXT-only user never pays for it.
+          parsers:  ['foliate-js/mobi.js', 'foliate-js/fb2.js',
+                     'foliate-js/comic-book.js', 'foliate-js/epub.js',
+                     '@zip.js/zip.js', 'fflate'],
         },
       },
     },
