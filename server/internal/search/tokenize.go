@@ -14,43 +14,38 @@
 // because byte-bigrams of "neural" don't help anyone.
 package search
 
-import (
-	"strings"
-	"unicode"
-)
+import "strings"
 
-// isCJK matches what the JS regex /[\u4e00-\u9fff\u3400-\u4dbf]/ saw.
-// We extend slightly to include common kana ranges so Japanese text
-// is also handled, since the legacy code treated katakana/hiragana
-// the same way (see tokenize.js).
-func isCJK(r rune) bool {
+// isChineseHan reports whether r is in the Han ranges we support for
+// Chinese search. BookFree currently supports Chinese + English only,
+// so kana, hangul, Cyrillic, Greek, Arabic and other scripts are
+// intentionally ignored instead of being indexed.
+func isChineseHan(r rune) bool {
 	switch {
-	case r >= 0x3040 && r <= 0x309F: // hiragana
+	case r >= 0x3400 && r <= 0x4DBF: // CJK Unified Ideographs Extension A
 		return true
-	case r >= 0x30A0 && r <= 0x30FF: // katakana
+	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified Ideographs
 		return true
-	case r >= 0x3400 && r <= 0x4DBF: // CJK Ext A
+	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility Ideographs
 		return true
-	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified
-		return true
-	case r >= 0xF900 && r <= 0xFAFF: // CJK Compat
-		return true
-	case r >= 0x20000 && r <= 0x2A6DF: // CJK Ext B
+	case r >= 0x20000 && r <= 0x2A6DF: // CJK Unified Ideographs Extension B
 		return true
 	}
 	return false
 }
 
-func isLatinDigit(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r)
+func isASCIILatinDigit(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9')
 }
 
 // Tokenize emits the FTS-friendly tokens for one piece of text.
 //
-//	Latin/digit runs   → one lowercased token per run
-//	CJK runs (≥2)      → overlapping bigrams
-//	CJK runs of len 1  → that single character
-//	everything else    → discarded (whitespace, punctuation, …)
+//	ASCII latin/digit runs → one lowercased token per run
+//	Chinese Han runs (≥2)  → overlapping bigrams
+//	Chinese Han len 1      → that single character
+//	everything else        → discarded (whitespace, punctuation, unsupported scripts, …)
 //
 // This is the same contract the JS tokenizer exposes — see
 // src/lib/search/tokenize.js. The only intentional simplification is
@@ -68,9 +63,9 @@ func Tokenize(s string) []string {
 	for i < len(runes) {
 		r := runes[i]
 		switch {
-		case isCJK(r):
+		case isChineseHan(r):
 			j := i
-			for j < len(runes) && isCJK(runes[j]) {
+			for j < len(runes) && isChineseHan(runes[j]) {
 				j++
 			}
 			run := runes[i:j]
@@ -82,9 +77,9 @@ func Tokenize(s string) []string {
 				}
 			}
 			i = j
-		case isLatinDigit(r):
+		case isASCIILatinDigit(r):
 			j := i
-			for j < len(runes) && isLatinDigit(runes[j]) {
+			for j < len(runes) && isASCIILatinDigit(runes[j]) {
 				j++
 			}
 			out = append(out, strings.ToLower(string(runes[i:j])))

@@ -1,5 +1,6 @@
 # Build outputs
 /bookfree-server
+/bookfree-server.exe
 /apps/web/dist/
 /apps/web/node_modules/
 /apps/web/.npm-cache/
@@ -9,6 +10,7 @@
 
 # Runtime data
 /data/
+/tmp/
 
 # Editor / OS noise
 .DS_Store
@@ -24,4 +26,4 @@
 
 .clinerules/
 
-
+/test_book/
