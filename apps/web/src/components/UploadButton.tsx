@@ -28,7 +28,7 @@ interface UploadResult {
   status: string;
 }
 
-const ACCEPT = '.epub,.pdf,.txt,.fb2,.fbz,.cbz,.mobi,.azw,.azw3';
+const ACCEPT = '.epub,.pdf,.txt';
 
 export default function UploadButton({ onUploaded, variant = 'primary' }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -61,9 +61,10 @@ export default function UploadButton({ onUploaded, variant = 'primary' }: Props)
       return;
     }
 
-    // PDFs aren't ingested — pdf.js paginates them at read time so the
-    // book is "ready enough" without chapters/chunks. We still call
-    // /ingest with empty chapters so search has something attached.
+    // PDFs are rendered directly from the original file by pdf.js, so
+    // the server-side ingest only needs to mark the book ready. If that
+    // state transition fails, surface it instead of leaving the library
+    // stuck at "待解析".
     if (format === 'pdf') {
       try {
         await api.post(`/api/books/${bookId}/ingest`, {
@@ -71,8 +72,13 @@ export default function UploadButton({ onUploaded, variant = 'primary' }: Props)
           chapters: [],
           chunks: [],
         });
-      } catch {
-        /* OK if it fails — the book stays uploaded and is still readable. */
+      } catch (err) {
+        const m = err instanceof ApiException ? err.message : (err as Error).message;
+        toast.error('PDF 入库失败：' + m);
+        try { await api.post(`/api/books/${bookId}/ingest/fail`, { error: m }); } catch { /* ignore */ }
+        setBusy(null);
+        onUploaded?.();
+        return;
       }
       toast.success(`已添加：${file.name}`);
       setBusy(null);

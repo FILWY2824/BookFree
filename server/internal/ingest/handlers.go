@@ -27,6 +27,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,10 +86,14 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Confirm ownership before doing any heavy work.
+	// Confirm ownership before doing any heavy work. We also load the
+	// format because PDF is rendered directly from the original file in
+	// the browser and is allowed to complete ingest without extracted
+	// chapters/chunks.
 	var ownerID string
+	var bookFormat string
 	if err := h.DB.QueryRowContext(r.Context(),
-		`SELECT user_id FROM books WHERE id = ? LIMIT 1`, bookID).Scan(&ownerID); err != nil {
+		`SELECT user_id, format FROM books WHERE id = ? LIMIT 1`, bookID).Scan(&ownerID, &bookFormat); err != nil {
 		if err == sql.ErrNoRows || ownerID != user.ID {
 			response.Fail(w, http.StatusNotFound, response.CodeNotFound, "书籍不存在")
 			return
@@ -107,7 +112,7 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		response.Fail(w, http.StatusBadRequest, response.CodeValidation, "请求体非法："+err.Error())
 		return
 	}
-	if len(body.Chapters) == 0 && len(body.Chunks) == 0 {
+	if len(body.Chapters) == 0 && len(body.Chunks) == 0 && strings.ToLower(bookFormat) != "pdf" {
 		response.Fail(w, http.StatusBadRequest, response.CodeValidation,
 			"chapters 与 chunks 至少需要一项")
 		return
@@ -141,6 +146,8 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	chapterIDs := make(map[string]string, len(body.Chapters))
+
 	// Insert chapters. We accept either html or text (or both); at
 	// least one has to be present for the reader to render anything.
 	if len(body.Chapters) > 0 {
@@ -153,11 +160,12 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, c := range body.Chapters {
-			if c.ID == "" {
-				continue
+			dbID := scopedIngestID(bookID, "chapter", c.ID, c.Ord)
+			if strings.TrimSpace(c.ID) != "" {
+				chapterIDs[c.ID] = dbID
 			}
 			if _, err := stmt.ExecContext(r.Context(),
-				c.ID, bookID, user.ID, c.Ord,
+				dbID, bookID, user.ID, c.Ord,
 				nullStr(c.Title), nullStr(c.Href),
 				nullStr(c.HTML), nullStr(c.Text),
 				now); err != nil {
@@ -183,13 +191,20 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, c := range body.Chunks {
-			if c.ID == "" || strings.TrimSpace(c.Text) == "" {
+			if strings.TrimSpace(c.Text) == "" {
 				continue
+			}
+			dbID := scopedIngestID(bookID, "chunk", c.ID, c.Ord)
+			chapterID := nullStrPtr(c.ChapterID)
+			if c.ChapterID != nil {
+				if mapped, ok := chapterIDs[*c.ChapterID]; ok {
+					chapterID = mapped
+				}
 			}
 			searchText := search.SearchText(c.Text)
 			if _, err := stmt.ExecContext(r.Context(),
-				c.ID, bookID, user.ID,
-				nullStrPtr(c.ChapterID), nullIntPtr(c.ChapterOrd), nullIntPtr(c.PageNo),
+				dbID, bookID, user.ID,
+				chapterID, nullIntPtr(c.ChapterOrd), nullIntPtr(c.PageNo),
 				c.Ord, c.Text, searchText, now); err != nil {
 				stmt.Close()
 				response.FailSafe(w, "ingest.insert_chunk", err, http.StatusInternalServerError, h.IsProd)
@@ -291,6 +306,14 @@ func (h *Handler) HandleFail(w http.ResponseWriter, r *http.Request) {
 	`, msg, now, now, bookID, user.ID)
 
 	response.OK(w, map[string]any{"bookId": bookID, "status": "failed"})
+}
+
+func scopedIngestID(bookID, kind, raw string, ord int) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = strconv.Itoa(ord)
+	}
+	return bookID + ":" + kind + ":" + raw
 }
 
 func nullStr(s *string) any {
