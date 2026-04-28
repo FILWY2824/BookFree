@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"bookfree/internal/ai"
 	"bookfree/internal/auth"
 	"bookfree/internal/books"
 	"bookfree/internal/chapters"
@@ -134,6 +135,15 @@ func New(deps RouterDeps) http.Handler {
 	// ── Search ────────────────────────────────────────────────────
 	sh := &searchapi.Handler{DB: deps.DB, IsProd: deps.IsProd}
 	mux.Handle("GET /api/search", auth.RequireUser(http.HandlerFunc(sh.HandleSearch)))
+
+	// ── AI chat ────────────────────────────────────────────────────
+	// Server-side proxy to Anthropic. Reads ANTHROPIC_API_KEY from
+	// env. Status returns {configured} unconditionally; chat returns
+	// 501 NOT_CONFIGURED when the key is missing so the client can
+	// show a friendly message.
+	aih := &ai.Handler{DB: deps.DB, IsProd: deps.IsProd}
+	mux.Handle("GET /api/ai/status", auth.RequireUser(http.HandlerFunc(aih.HandleStatus)))
+	mux.Handle("POST /api/ai/chat", auth.RequireUser(http.HandlerFunc(aih.HandleChat)))
 
 	// ── /api/* catch-all → 404 JSON instead of HTML ───────────────
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

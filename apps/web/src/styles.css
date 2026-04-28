@@ -4,8 +4,7 @@
 
 /* LXGW WenKai is the recommended CJK font but it's a 30 MB asset.
    We load it lazily over jsdelivr so reader components feel right
-   on Chinese text without bloating the cold-start bundle. The CSP
-   in middleware.go allows cdn.jsdelivr.net specifically for this. */
+   on Chinese text without bloating the cold-start bundle. */
 @font-face {
   font-family: 'LXGW WenKai';
   font-style: normal;
@@ -15,8 +14,6 @@
 }
 
 :root {
-  /* Light reader theme is the default. Each theme below overrides
-     these on a [data-reader-theme="..."] selector at the reader root. */
   --reader-bg: #FAF7F2;
   --reader-fg: #1B2230;
   --reader-border: #EBE5D9;
@@ -33,9 +30,7 @@
 [data-reader-theme="slate"]  { --reader-bg: #232831; --reader-fg: #DCE2EA; --reader-border: #313945; --reader-muted: #98A2B0; }
 [data-reader-theme="dark"]   { --reader-bg: #0F1420; --reader-fg: #DCE2EA; --reader-border: #232A38; --reader-muted: #8C95A4; }
 
-html, body, #root {
-  height: 100%;
-}
+html, body, #root { height: 100%; }
 
 body {
   @apply bg-paper-50 text-ink-800 antialiased;
@@ -43,12 +38,11 @@ body {
 
 /* Selection in the reader — uses the active accent so highlights feel
    coherent regardless of which theme is on. */
-.reader-prose ::selection {
+.reader-prose ::selection,
+.reader-paginated ::selection {
   background: rgba(124, 90, 58, 0.25);
 }
 
-/* Tailwind doesn't ship a typographic prose stack by default; we keep
-   it minimal and tuned to the reader column. */
 .reader-prose {
   font-family: theme('fontFamily.serif');
   line-height: 1.85;
@@ -88,17 +82,113 @@ body {
   overflow-x: auto;
 }
 
-/* Highlight colours — anchored on the ::mark element painted in by
-   the reader. We use translucent fills so they layer over either
-   light or dark themes. */
-.hl-yellow { background: rgba(255, 217, 0, 0.40); }
-.hl-red    { background: rgba(255, 99, 99, 0.35); }
-.hl-green  { background: rgba(95, 200, 110, 0.35); }
-.hl-blue   { background: rgba(99, 165, 255, 0.35); }
-.hl-purple { background: rgba(186, 130, 235, 0.35); }
-.hl-orange { background: rgba(255, 159, 80, 0.40); }
+/* ─────────────────────────────────────────────────────────────────
+   Paginated reader. CSS columns turn the chapter HTML into a strip
+   of fixed-width pages laid out horizontally, with the viewport
+   masking everything but one page at a time.
 
-/* The library's bookcard: a portrait card with a paper texture. */
+   The container is given the *negative* translateX corresponding
+   to the active page index. Because columns are exactly 100% of
+   the viewport, the math is simply (pageIndex * width).
+
+   We disable inline image break-inside so figures don't get sliced
+   between pages, and force long words to break instead of producing
+   columns wider than the viewport.
+   ───────────────────────────────────────────────────────────────── */
+.reader-paginated {
+  font-family: theme('fontFamily.serif');
+  color: var(--reader-fg);
+}
+.reader-paginated p { margin: 1em 0; }
+.reader-paginated h1, .reader-paginated h2, .reader-paginated h3 {
+  font-weight: 600;
+  margin: 1.5em 0 0.6em;
+  color: var(--reader-fg);
+  break-after: avoid;
+}
+.reader-paginated h1 { font-size: 1.5em; }
+.reader-paginated h2 { font-size: 1.25em; }
+.reader-paginated h3 { font-size: 1.1em; }
+.reader-paginated img,
+.reader-paginated svg,
+.reader-paginated figure,
+.reader-paginated blockquote,
+.reader-paginated pre,
+.reader-paginated table {
+  break-inside: avoid;
+  max-width: 100%;
+}
+.reader-paginated img { height: auto; }
+.reader-paginated blockquote {
+  border-left: 3px solid var(--reader-border);
+  padding-left: 1em;
+  color: var(--reader-muted);
+  margin: 1em 0;
+}
+.reader-paginated pre {
+  background: var(--reader-border);
+  padding: 1em;
+  border-radius: 0.5em;
+  overflow-x: auto;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Highlight / annotation styles. Each annotation is rendered as a
+   <span class="hl hl-{style} hl-color-{color}" data-hl-id="…"> wrapper
+   the reader inserts around the original text. Style classes drive the
+   rendering shape; color classes drive the colour token.
+   ───────────────────────────────────────────────────────────────── */
+.hl {
+  cursor: pointer;
+  border-radius: 2px;
+  transition: filter 120ms ease;
+}
+.hl:hover { filter: brightness(0.95); }
+
+/* Filled highlight (default 'highlight' style). */
+.hl-highlight.hl-color-yellow { background: rgba(255, 217, 0, 0.40); }
+.hl-highlight.hl-color-red    { background: rgba(255, 99, 99, 0.35); }
+.hl-highlight.hl-color-green  { background: rgba(95, 200, 110, 0.35); }
+.hl-highlight.hl-color-blue   { background: rgba(99, 165, 255, 0.35); }
+.hl-highlight.hl-color-purple { background: rgba(186, 130, 235, 0.35); }
+.hl-highlight.hl-color-orange { background: rgba(255, 159, 80, 0.40); }
+
+/* Underline — flat single line in the highlight colour. We use
+   `text-decoration` because it follows ascenders/descenders correctly
+   across line wraps, unlike a bottom-border which only paints the
+   first line. */
+.hl-underline.hl-color-yellow { text-decoration: underline solid #C9A800; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.hl-underline.hl-color-red    { text-decoration: underline solid #D93D3D; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.hl-underline.hl-color-green  { text-decoration: underline solid #3FA458; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.hl-underline.hl-color-blue   { text-decoration: underline solid #3F87E5; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.hl-underline.hl-color-purple { text-decoration: underline solid #9659D8; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.hl-underline.hl-color-orange { text-decoration: underline solid #E07526; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+
+/* Wavy line — same colour token, wavy variant. */
+.hl-wavy.hl-color-yellow { text-decoration: underline wavy #C9A800; text-decoration-thickness: 1.5px; text-underline-offset: 4px; }
+.hl-wavy.hl-color-red    { text-decoration: underline wavy #D93D3D; text-decoration-thickness: 1.5px; text-underline-offset: 4px; }
+.hl-wavy.hl-color-green  { text-decoration: underline wavy #3FA458; text-decoration-thickness: 1.5px; text-underline-offset: 4px; }
+.hl-wavy.hl-color-blue   { text-decoration: underline wavy #3F87E5; text-decoration-thickness: 1.5px; text-underline-offset: 4px; }
+.hl-wavy.hl-color-purple { text-decoration: underline wavy #9659D8; text-decoration-thickness: 1.5px; text-underline-offset: 4px; }
+.hl-wavy.hl-color-orange { text-decoration: underline wavy #E07526; text-decoration-thickness: 1.5px; text-underline-offset: 4px; }
+
+/* Strikethrough. */
+.hl-strike { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+.hl-strike.hl-color-yellow { text-decoration-color: #C9A800; }
+.hl-strike.hl-color-red    { text-decoration-color: #D93D3D; }
+.hl-strike.hl-color-green  { text-decoration-color: #3FA458; }
+.hl-strike.hl-color-blue   { text-decoration-color: #3F87E5; }
+.hl-strike.hl-color-purple { text-decoration-color: #9659D8; }
+.hl-strike.hl-color-orange { text-decoration-color: #E07526; }
+
+/* Notes get a small dotted underline indicator on top of whatever
+   highlight style is active so users can spot which annotations have
+   notes attached. */
+.hl-has-note {
+  box-shadow: 0 -2px 0 0 var(--reader-accent) inset;
+}
+
+/* The library's bookcard. */
 .book-card-spine {
   background: linear-gradient(110deg,
     var(--card-spine, #7C5A3A) 0%,
@@ -115,20 +205,425 @@ body {
 }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 
-/* Drawer slide-in animation. */
-@keyframes drawer-in {
+/* ─────────────────────────────────────────────────────────────────
+   Drawer animations.
+   We have TWO drawer keyframes now — left for the TOC (slides in
+   from the left edge) and right for SettingsDrawer / AIChatPanel.
+   The TOC used to share the right keyframe with `animation-direction:
+   reverse`, which made the drawer animate AWAY from the visible
+   position before snapping back, producing the "flash" the user
+   reported.
+   ───────────────────────────────────────────────────────────────── */
+@keyframes drawer-in-right {
   from { transform: translateX(100%); }
   to   { transform: translateX(0);    }
 }
+@keyframes drawer-in-left {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(0);     }
+}
+.animate-drawer-in-right {
+  animation: drawer-in-right 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.animate-drawer-in-left {
+  animation: drawer-in-left 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+/* Legacy class alias — old code paths still reference this name. */
 .animate-drawer-in {
-  animation: drawer-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: drawer-in-right 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
-/* Modal fade-in. */
 @keyframes fade-in {
   from { opacity: 0; }
   to   { opacity: 1; }
 }
 .animate-fade-in {
-  animation: fade-in 160ms ease-out;
+  animation: fade-in 160ms ease-out both;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Blocking modal — used while the reader is opening a book or
+   re-rendering after a settings change. Above the drawers (z-50)
+   so it stays visible if a drawer happens to be open at the time.
+   ───────────────────────────────────────────────────────────────── */
+.modal-blocking-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fade-in 140ms ease-out both;
+}
+.modal-blocking-card {
+  background: var(--reader-bg, #FAF7F2);
+  color: var(--reader-fg, #1B2230);
+  border: 1px solid var(--reader-border, #EBE5D9);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  min-width: 220px;
+  max-width: 80vw;
+  box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  animation: modal-pop 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes modal-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+
+/* Indeterminate spinner. We keep it small (16 px) — the modal tells
+   the user what's happening with text; the spinner is a heartbeat. */
+.spinner-ring {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Page navigation buttons that float over the reader. Two pill-
+   shaped affordances on the inner edges of the page; we keep them
+   discreet (low contrast, mostly transparent) and let them brighten
+   on hover so they don't fight the prose.
+   ───────────────────────────────────────────────────────────────── */
+.page-nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid var(--reader-border);
+  color: var(--reader-fg);
+  opacity: 0.32;
+  transition: opacity 160ms ease, background 160ms ease, transform 160ms ease;
+  z-index: 20;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(6px);
+          backdrop-filter: blur(6px);
+}
+[data-reader-theme="forest"] .page-nav-btn,
+[data-reader-theme="slate"]  .page-nav-btn,
+[data-reader-theme="dark"]   .page-nav-btn {
+  background: rgba(255, 255, 255, 0.06);
+}
+.page-nav-btn:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.10);
+}
+[data-reader-theme="forest"] .page-nav-btn:hover,
+[data-reader-theme="slate"]  .page-nav-btn:hover,
+[data-reader-theme="dark"]   .page-nav-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.page-nav-btn:active { transform: translateY(-50%) scale(0.96); }
+.page-nav-btn:disabled {
+  opacity: 0.12;
+  cursor: not-allowed;
+}
+.page-nav-btn-left  { left: 12px; }
+.page-nav-btn-right { right: 12px; }
+
+/* Click zones — invisible buttons covering the left third / right
+   third of the reader. They sit BELOW page-nav-btn (so the explicit
+   buttons still receive clicks) and BELOW any selection overlay. */
+.page-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 5;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  /* Invisible by default — we don't want to give the user the wrong
+     impression that the entire third of the page is some clickable
+     widget. The cursor change on hover plus the page flip is the
+     feedback. */
+}
+.page-zone-left  { left: 0;  width: 33.333%; cursor: w-resize; }
+.page-zone-right { right: 0; width: 33.333%; cursor: e-resize; }
+
+/* ─────────────────────────────────────────────────────────────────
+   Selection toolbar — a small floating popover above the user's
+   text selection with highlight / underline / wavy / note actions.
+   ───────────────────────────────────────────────────────────────── */
+.selection-toolbar {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--reader-bg);
+  border: 1px solid var(--reader-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 28px -8px rgba(0, 0, 0, 0.35);
+  color: var(--reader-fg);
+  animation: selection-pop 140ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  user-select: none;
+  min-width: 220px;
+}
+@keyframes selection-pop {
+  from { opacity: 0; transform: translateY(4px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+.selection-toolbar .row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.selection-toolbar .style-row .label,
+.selection-toolbar .color-row .label {
+  font-size: 11px;
+  color: var(--reader-muted);
+  width: 32px;
+  flex-shrink: 0;
+}
+.style-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--reader-border);
+  background: transparent;
+  font-size: 12px;
+  color: var(--reader-fg);
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.style-pill:hover { background: rgba(0, 0, 0, 0.05); }
+.style-pill.active {
+  background: var(--reader-accent);
+  color: #fff;
+  border-color: var(--reader-accent);
+}
+.color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 120ms ease;
+}
+.color-swatch:hover { transform: scale(1.1); }
+.color-swatch.active {
+  border-color: var(--reader-fg);
+  outline: 2px solid var(--reader-bg);
+}
+
+.selection-toolbar .actions {
+  display: flex;
+  gap: 4px;
+  border-top: 1px solid var(--reader-border);
+  padding-top: 6px;
+  margin-top: 2px;
+}
+.selection-toolbar .action-btn {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--reader-fg);
+  cursor: pointer;
+}
+.selection-toolbar .action-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+/* Note editor (a tiny textarea that pops out below an existing
+   highlight when you click it). */
+.note-editor {
+  position: absolute;
+  z-index: 30;
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+  border: 1px solid var(--reader-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px -8px rgba(0, 0, 0, 0.35);
+  width: 280px;
+  padding: 10px;
+  animation: selection-pop 140ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.note-editor textarea {
+  width: 100%;
+  min-height: 70px;
+  resize: vertical;
+  border: 1px solid var(--reader-border);
+  border-radius: 6px;
+  padding: 6px;
+  font-size: 13px;
+  background: transparent;
+  color: var(--reader-fg);
+  font-family: inherit;
+  line-height: 1.5;
+}
+.note-editor .note-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+.note-editor .note-buttons button {
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--reader-border);
+  background: transparent;
+  color: var(--reader-fg);
+  cursor: pointer;
+}
+.note-editor .note-buttons button.primary {
+  background: var(--reader-accent);
+  color: #fff;
+  border-color: var(--reader-accent);
+}
+.note-editor .note-buttons button.danger {
+  color: #c93a3a;
+  border-color: #c93a3a;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   AI chat panel.
+   ───────────────────────────────────────────────────────────────── */
+.ai-bubble-user {
+  background: var(--reader-accent);
+  color: #fff;
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border-bottom-right-radius: 4px;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.ai-bubble-asst {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--reader-fg);
+  align-self: flex-start;
+  max-width: 92%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+[data-reader-theme="forest"] .ai-bubble-asst,
+[data-reader-theme="slate"]  .ai-bubble-asst,
+[data-reader-theme="dark"]   .ai-bubble-asst {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   NumericStepper — used in SettingsDrawer for font size, line height,
+   column width. Three-cell flex row: [−] [ value ] [+].
+
+   We rely on --reader-* variables so the control inherits whatever
+   theme is active. The buttons get a soft hover background built
+   from the accent at low alpha. The center "display" wraps a
+   transparent <input> + a suffix span; on focus we hide the suffix
+   and let the input claim full width so the user types cleanly.
+   ───────────────────────────────────────────────────────────────── */
+.reader-stepper {
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--reader-border);
+  background: rgba(0, 0, 0, 0.015);
+  overflow: hidden;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+[data-reader-theme="forest"] .reader-stepper,
+[data-reader-theme="slate"]  .reader-stepper,
+[data-reader-theme="dark"]   .reader-stepper {
+  background: rgba(255, 255, 255, 0.04);
+}
+.reader-stepper-focused {
+  border-color: var(--reader-accent);
+  box-shadow: 0 0 0 3px rgba(124, 90, 58, 0.10);
+}
+.reader-stepper-btn {
+  flex: 0 0 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--reader-fg);
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease, color 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.reader-stepper-btn:hover:not(:disabled) {
+  background: rgba(124, 90, 58, 0.10);
+  color: var(--reader-accent);
+}
+.reader-stepper-btn:active:not(:disabled) {
+  background: rgba(124, 90, 58, 0.18);
+}
+.reader-stepper-btn:disabled {
+  opacity: 0.28;
+  cursor: not-allowed;
+}
+/* Vertical separator hairlines between the three cells. */
+.reader-stepper-btn + .reader-stepper-display,
+.reader-stepper-display + .reader-stepper-btn {
+  border-left: 1px solid var(--reader-border);
+}
+.reader-stepper-display {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 6px;
+  position: relative;
+}
+.reader-stepper-input {
+  width: 100%;
+  text-align: center;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  color: var(--reader-fg);
+  padding: 0;
+  letter-spacing: 0.02em;
+}
+.reader-stepper-input::-webkit-outer-spin-button,
+.reader-stepper-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.reader-stepper-suffix {
+  font-size: 11px;
+  color: var(--reader-muted);
+  letter-spacing: 0.04em;
+  pointer-events: none;
 }

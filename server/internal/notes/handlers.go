@@ -44,8 +44,13 @@ type highlightDTO struct {
 	Locator      string  `json:"locator"`
 	SelectedText string  `json:"selectedText"`
 	Color        string  `json:"color"`
-	CreatedAt    int64   `json:"createdAt"`
-	UpdatedAt    int64   `json:"updatedAt"`
+	// Style is one of: "highlight", "underline", "wavy", "strike".
+	// Persisted via migration 0019. Defaults to "highlight" for legacy
+	// rows. We always emit it on the wire so the client renders the
+	// right CSS class without inferring.
+	Style     string `json:"style"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
 }
 
 type highlightCreate struct {
@@ -54,6 +59,7 @@ type highlightCreate struct {
 	Locator      string  `json:"locator"`
 	SelectedText string  `json:"selectedText"`
 	Color        string  `json:"color"`
+	Style        string  `json:"style,omitempty"`
 }
 
 // GET /api/books/{id}/highlights
@@ -61,7 +67,7 @@ func (h *Handler) HandleListHighlights(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	bookID := r.PathValue("id")
 	rows, err := h.DB.QueryContext(r.Context(), `
-		SELECT id, book_id, chapter_id, page_no, locator, selected_text, color, created_at, updated_at
+		SELECT id, book_id, chapter_id, page_no, locator, selected_text, color, style, created_at, updated_at
 		FROM highlights
 		WHERE user_id = ? AND book_id = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -78,7 +84,7 @@ func (h *Handler) HandleListHighlights(w http.ResponseWriter, r *http.Request) {
 		var chapter sql.NullString
 		var page sql.NullInt64
 		if err := rows.Scan(&d.ID, &d.BookID, &chapter, &page, &d.Locator,
-			&d.SelectedText, &d.Color, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			&d.SelectedText, &d.Color, &d.Style, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			response.FailSafe(w, "highlights.scan", err, http.StatusInternalServerError, h.IsProd)
 			return
 		}
@@ -117,15 +123,18 @@ func (h *Handler) HandleCreateHighlight(w http.ResponseWriter, r *http.Request) 
 	if !validColor(body.Color) {
 		body.Color = "yellow"
 	}
+	if !validStyle(body.Style) {
+		body.Style = "highlight"
+	}
 	id := security.RandomID()
 	now := time.Now().Unix()
 	if _, err := h.DB.ExecContext(r.Context(), `
 		INSERT INTO highlights (id, user_id, book_id, chapter_id, page_no, locator,
-		                        selected_text, color, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                        selected_text, color, style, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, user.ID, bookID,
 		nullStrPtr(body.ChapterID), nullIntPtr(body.PageNo),
-		body.Locator, body.SelectedText, body.Color, now, now); err != nil {
+		body.Locator, body.SelectedText, body.Color, body.Style, now, now); err != nil {
 		response.FailSafe(w, "highlights.create", err, http.StatusInternalServerError, h.IsProd)
 		return
 	}
@@ -138,6 +147,7 @@ func (h *Handler) HandleCreateHighlight(w http.ResponseWriter, r *http.Request) 
 			Locator:      body.Locator,
 			SelectedText: body.SelectedText,
 			Color:        body.Color,
+			Style:        body.Style,
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		},
@@ -416,6 +426,17 @@ func ownsBook(r *http.Request, db *sql.DB, userID, bookID string) bool {
 func validColor(c string) bool {
 	switch c {
 	case "yellow", "red", "green", "blue", "purple", "orange":
+		return true
+	}
+	return false
+}
+
+// validStyle gates the highlight `style` column. Mirrors the four
+// values supported by migration 0019 and the client-side
+// HighlightStyle union.
+func validStyle(s string) bool {
+	switch s {
+	case "highlight", "underline", "wavy", "strike":
 		return true
 	}
 	return false

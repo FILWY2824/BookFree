@@ -6,6 +6,11 @@
 // chapter list — already populated by the cbz parser at ingest time —
 // gives us the zip-entry filename for each page in chapter.href.
 //
+// CBZ only supports paginated mode — comics don't reflow and a strip
+// of full-bleed images would defeat the format's whole point. The
+// PageMode prop is accepted for prop-shape parity with other readers
+// but we ignore it.
+//
 // Memory: one decoded page in flight as a blob URL, revoked on every
 // page change. We rely on zip.js's lazy decoding so we never have
 // the whole archive decompressed at once. On unmount we close the
@@ -20,6 +25,7 @@ import {
   type Entry,
 } from '@zip.js/zip.js';
 import { api } from '../lib/api';
+import PageNav from '../components/PageNav';
 
 interface Chapter {
   id: string;
@@ -33,24 +39,26 @@ interface Props {
   /** Active page (zero-indexed, matches chapterOrd in the parent). */
   chapterOrd: number;
   onChapterChange: (ord: number) => void;
+  onReady?: () => void;
+  onBusy?: (busy: boolean) => void;
 }
 
-// Module-level configure call so we don't reach for Web Workers in
-// dev (Vite's dev server doesn't ship them as separate chunks). The
-// option is idempotent.
 zipConfigure({ useWebWorkers: false });
 
-export default function CbzReader({ bookId, chapterOrd, onChapterChange }: Props) {
+export default function CbzReader({
+  bookId, chapterOrd, onChapterChange, onReady, onBusy,
+}: Props) {
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [entries, setEntries] = useState<Map<string, Entry> | null>(null);
   const [imgUrl, setImgUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const urlRef = useRef<string | null>(null);
   const readerRef = useRef<ZipReader<Blob> | null>(null);
+  // Captured at mount; used to fire onReady exactly once after the
+  // first image actually paints.
+  const readyFiredRef = useRef(false);
 
-  // Step 1: load the chapter (page) list. Each chapter's `href` points
-  // at the zip entry inside the original .cbz.
+  // Step 1: load the chapter (page) list.
   useEffect(() => {
     let cancelled = false;
     api.get<{ chapters: Chapter[] }>(`/api/books/${bookId}/chapters/list`)
@@ -62,7 +70,7 @@ export default function CbzReader({ bookId, chapterOrd, onChapterChange }: Props
   // Step 2: stream and open the .cbz once, keep the entries map.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    onBusy?.(true);
     (async () => {
       try {
         const res = await fetch(`/api/books/${bookId}/file`, { credentials: 'same-origin' });
@@ -79,7 +87,7 @@ export default function CbzReader({ bookId, chapterOrd, onChapterChange }: Props
       } catch (e) {
         if (!cancelled) setError((e as Error).message ?? 'CBZ 加载失败');
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) onBusy?.(false);
       }
     })();
     return () => {
@@ -87,6 +95,7 @@ export default function CbzReader({ bookId, chapterOrd, onChapterChange }: Props
       readerRef.current?.close().catch(() => { /* ignore */ });
       readerRef.current = null;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
 
   // Step 3: whenever the active chapter or zip changes, swap the image.
@@ -103,29 +112,30 @@ export default function CbzReader({ bookId, chapterOrd, onChapterChange }: Props
       return;
     }
     let cancelled = false;
+    onBusy?.(true);
     (async () => {
       try {
-        // zip.js's typings are awkward; the runtime accepts a writer
-        // and returns whatever it produces. BlobWriter lets us pass a
-        // mime hint so Safari renders the image without a content-
-        // type sniff round-trip.
         const blob: Blob = await (entry.getData(new BlobWriter(guessImageMime(ch.href!))) as Promise<Blob>);
         if (cancelled) return;
         const url = URL.createObjectURL(blob);
-        // Replace the previous URL after we have a new one to avoid
-        // a flicker between pages.
         if (urlRef.current) URL.revokeObjectURL(urlRef.current);
         urlRef.current = url;
         setImgUrl(url);
         setError(null);
+        if (!readyFiredRef.current) {
+          readyFiredRef.current = true;
+          onReady?.();
+        }
       } catch (e) {
         if (!cancelled) setError('页面解压失败：' + (e as Error).message);
+      } finally {
+        if (!cancelled) onBusy?.(false);
       }
     })();
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, chapters, chapterOrd]);
 
-  // Revoke any outstanding blob URL on unmount so we don't leak.
   useEffect(() => () => {
     if (urlRef.current) {
       URL.revokeObjectURL(urlRef.current);
@@ -146,60 +156,38 @@ export default function CbzReader({ bookId, chapterOrd, onChapterChange }: Props
       className="h-full flex flex-col"
       style={{ background: 'var(--reader-bg)', color: 'var(--reader-fg)' }}
     >
-      <div className="flex-1 min-h-0 relative overflow-auto">
-        {loading && (
-          <div className="absolute inset-0 flex items-center justify-center" style={{ color: 'var(--reader-muted)' }}>
-            正在打开 CBZ…
-          </div>
-        )}
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center text-rose-500 px-6 text-center">
-            {error}
-          </div>
-        )}
-        {!loading && !error && imgUrl && (
-          <div className="h-full w-full flex items-start justify-center p-2">
-            <img
-              src={imgUrl}
-              alt={`Page ${chapterOrd + 1}`}
-              className="max-w-full h-auto select-none"
-              draggable={false}
-            />
-          </div>
-        )}
-        {/* Click left/right to flip pages — same gesture as EpubReader. */}
-        <button
-          onClick={() => canPrev && onChapterChange(chapterOrd - 1)}
-          disabled={!canPrev}
-          aria-label="上一页"
-          className="absolute left-0 top-0 h-full w-12 opacity-0 hover:opacity-30 bg-ink-900 transition-opacity disabled:cursor-not-allowed"
-        />
-        <button
-          onClick={() => canNext && onChapterChange(chapterOrd + 1)}
-          disabled={!canNext}
-          aria-label="下一页"
-          className="absolute right-0 top-0 h-full w-12 opacity-0 hover:opacity-30 bg-ink-900 transition-opacity disabled:cursor-not-allowed"
-        />
-      </div>
-      <div
-        className="shrink-0 flex items-center justify-between px-4 h-10 border-t text-sm"
-        style={{ borderColor: 'var(--reader-border)' }}
+      <PageNav
+        onPrev={() => canPrev && onChapterChange(chapterOrd - 1)}
+        onNext={() => canNext && onChapterChange(chapterOrd + 1)}
+        canPrev={canPrev}
+        canNext={canNext}
+        enabled={!error}
+        className="flex-1 min-h-0"
       >
-        <button
-          disabled={!canPrev}
-          onClick={() => onChapterChange(chapterOrd - 1)}
-          className="px-2 py-1 rounded disabled:opacity-30"
-        >
-          ← 上一页
-        </button>
-        <span style={{ color: 'var(--reader-muted)' }}>{footerLabel}</span>
-        <button
-          disabled={!canNext}
-          onClick={() => onChapterChange(chapterOrd + 1)}
-          className="px-2 py-1 rounded disabled:opacity-30"
-        >
-          下一页 →
-        </button>
+        <div className="h-full w-full relative overflow-hidden">
+          {error && (
+            <div className="absolute inset-0 flex items-center justify-center text-rose-500 px-6 text-center">
+              {error}
+            </div>
+          )}
+          {!error && imgUrl && (
+            <div className="h-full w-full flex items-start justify-center p-2">
+              <img
+                src={imgUrl}
+                alt={`Page ${chapterOrd + 1}`}
+                className="max-w-full h-auto select-none"
+                draggable={false}
+              />
+            </div>
+          )}
+        </div>
+      </PageNav>
+
+      <div
+        className="shrink-0 flex items-center justify-center px-4 h-10 border-t text-sm"
+        style={{ borderColor: 'var(--reader-border)', color: 'var(--reader-muted)' }}
+      >
+        <span className="tabular-nums">{footerLabel}</span>
       </div>
     </div>
   );

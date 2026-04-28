@@ -1,42 +1,262 @@
-// Reader preferences persisted to localStorage. We keep them client-side
-// because there's no value in syncing "I like 18 px serif" across
-// devices for the v1 scope, and avoiding a server round-trip on every
-// page load makes the reader feel crisp.
+// Reader preferences persisted to localStorage.
+//
+// pageMode controls how a long body is divided up:
+//   • 'paginated'      — left/right page flips, one screen of text
+//                         at a time. Default for EPUB / chapter content.
+//   • 'scroll-chapter' — vertical scroll within the current chapter,
+//                         with prev/next chapter at the edges.
+//   • 'scroll-book'    — vertical scroll across the entire book; we
+//                         lazy-load the next chapter as the user nears
+//                         the bottom. Only meaningful for chapter-based
+//                         formats (TXT/EPUB-as-text). EpubReader (epub.js)
+//                         falls back to 'scroll-chapter' under the hood.
+//
+// tocPinned keeps the table-of-contents drawer permanently docked on
+// the left, shrinking the reader column.
+//
+// Numeric controls:
+//   • fontSize    — px, 12 .. 32, step 1, default 18
+//   • lineHeight  — multiplier, 1.20 .. 2.60, step 0.05, default 1.85
+//   • columnWidth — rem, 24 .. 60, step 0.5, default 38   (was an
+//                   enum 'narrow'/'normal'/'wide'; now free-form so
+//                   the user can stepper or type any value)
+//
+// fontFamily is now a token id, not a CSS family. The token resolves
+// to a real CSS family stack via FONT_STACKS so we can ship eight
+// curated faces (four serif + four sans / display) and let the user
+// pick from a 4-column grid.
+//
+// Persistence per platform:
+//   The user explicitly asked that web / native-app / desktop store
+//   their reader prefs separately, since UI density and reading
+//   environment differ. We detect the runtime once and namespace the
+//   storage key. Migrations from v1 / v2 land in the per-platform
+//   key transparently.
 
 import { isThemeId, type ThemeId } from './themes';
+
+export type PageMode = 'paginated' | 'scroll-chapter' | 'scroll-book';
+export type Platform = 'web' | 'app' | 'window';
+
+// ── Font tokens ─────────────────────────────────────────────────────
+// Keep this list narrow on purpose. Eight faces is enough variety
+// without overwhelming the picker, and it matches the "two rows of
+// four" grid the user asked for.
+
+export type FontId =
+  | 'wenkai'      // 霞鹜文楷 — bundled webfont, the reader's house font
+  | 'han-serif'   // 思源宋体
+  | 'songti'      // 系统宋体（Songti SC / SimSun）
+  | 'kaiti'       // 楷体
+  | 'han-sans'    // 思源黑体
+  | 'pingfang'    // 苹方 / 微软雅黑
+  | 'fangsong'    // 仿宋
+  | 'mono';       // 等宽（JetBrains Mono / 等距更纱）
+
+export interface FontDef {
+  id: FontId;
+  /** Short Chinese label for the picker tile. */
+  label: string;
+  /** Slightly longer hint shown below the label. */
+  hint: string;
+  /** CSS font-family value. */
+  family: string;
+  /** Whether this is a serif-style face (used by epubjs theme picker). */
+  serif: boolean;
+}
+
+export const FONTS: readonly FontDef[] = [
+  {
+    id: 'wenkai',
+    label: '霞鹜文楷',
+    hint: '柔和宋体',
+    family: '"LXGW WenKai", "霞鹜文楷", ui-serif, Georgia, serif',
+    serif: true,
+  },
+  {
+    id: 'han-serif',
+    label: '思源宋体',
+    hint: '正式书宋',
+    family: '"Source Han Serif SC", "Source Han Serif CN", "Noto Serif CJK SC", "思源宋体", "Songti SC", "SimSun", serif',
+    serif: true,
+  },
+  {
+    id: 'songti',
+    label: '宋体',
+    hint: '系统宋体',
+    family: '"Songti SC", "SimSun", "宋体", "Noto Serif CJK SC", ui-serif, serif',
+    serif: true,
+  },
+  {
+    id: 'kaiti',
+    label: '楷体',
+    hint: '楷书风',
+    family: '"Kaiti SC", "STKaiti", "KaiTi", "楷体", "Noto Serif CJK SC", serif',
+    serif: true,
+  },
+  {
+    id: 'han-sans',
+    label: '思源黑体',
+    hint: '现代黑体',
+    family: '"Source Han Sans SC", "Source Han Sans CN", "Noto Sans CJK SC", "思源黑体", "PingFang SC", sans-serif',
+    serif: false,
+  },
+  {
+    id: 'pingfang',
+    label: '苹方',
+    hint: '系统黑体',
+    family: '"PingFang SC", "Microsoft YaHei", "微软雅黑", "Hiragino Sans GB", ui-sans-serif, sans-serif',
+    serif: false,
+  },
+  {
+    id: 'fangsong',
+    label: '仿宋',
+    hint: '半正式',
+    family: '"FangSong", "STFangsong", "仿宋", "FangSong_GB2312", ui-serif, serif',
+    serif: true,
+  },
+  {
+    id: 'mono',
+    label: '等宽',
+    hint: '代码风',
+    family: '"Sarasa Mono SC", "JetBrains Mono", "Fira Code", "Source Code Pro", ui-monospace, "Menlo", monospace',
+    serif: false,
+  },
+] as const;
+
+export function isFontId(s: unknown): s is FontId {
+  return typeof s === 'string' && FONTS.some(f => f.id === s);
+}
+
+export function fontFamilyOf(id: FontId): string {
+  return FONTS.find(f => f.id === id)?.family ?? FONTS[0].family;
+}
+
+export function isSerifFont(id: FontId): boolean {
+  return FONTS.find(f => f.id === id)?.serif ?? true;
+}
+
+// ── Numeric control bounds ─────────────────────────────────────────
+// Single source of truth so SettingsDrawer and prefs validation agree.
+
+export const FONT_SIZE = { min: 12, max: 32, step: 1 } as const;
+export const LINE_HEIGHT = { min: 1.2, max: 2.6, step: 0.05 } as const;
+export const COLUMN_WIDTH = { min: 24, max: 60, step: 0.5 } as const;
+
+// ── Prefs shape ────────────────────────────────────────────────────
 
 export interface ReaderPrefs {
   theme: ThemeId;
   fontSize: number;       // px
-  fontFamily: 'serif' | 'sans';
-  lineHeight: number;     // multiplier — 1.6 .. 2.2
-  columnWidth: 'narrow' | 'normal' | 'wide';
+  fontFamily: FontId;
+  lineHeight: number;     // multiplier
+  columnWidth: number;    // rem (was an enum; now free-form)
+  pageMode: PageMode;
+  tocPinned: boolean;
 }
-
-const STORAGE_KEY = 'bookfree.reader.prefs.v1';
 
 export const DEFAULT_PREFS: ReaderPrefs = {
   theme: 'light',
   fontSize: 18,
-  fontFamily: 'serif',
+  fontFamily: 'wenkai',
   lineHeight: 1.85,
-  columnWidth: 'normal',
+  columnWidth: 38,
+  pageMode: 'paginated',
+  tocPinned: false,
 };
+
+// ── Persistence ────────────────────────────────────────────────────
+
+const KEY_BASE = 'bookfree.reader.prefs.v3';
+const STORAGE_KEY_V2 = 'bookfree.reader.prefs.v2';
+const STORAGE_KEY_V1 = 'bookfree.reader.prefs.v1';
+
+/** Detects which runtime surface the user is on. We treat a PWA in
+ *  standalone display mode as "app" because the user explicitly
+ *  installed it, and a Tauri/Electron host as "window". Everything
+ *  else (a browser tab, including mobile Safari without standalone)
+ *  is plain "web".
+ *
+ *  Detection runs once at module load — any later runtime mode swap
+ *  (extremely rare) won't be picked up, which is fine: prefs are
+ *  per-launch state and you want them stable inside one session. */
+export function detectPlatform(): Platform {
+  try {
+    if (typeof window === 'undefined') return 'web';
+    type W = Window & {
+      __TAURI__?: unknown;
+      process?: { versions?: { electron?: unknown } };
+      __NEUTRALINO__?: unknown;
+    };
+    const w = window as W;
+    if (w.__TAURI__ || w.__NEUTRALINO__) return 'window';
+    if (w.process?.versions?.electron) return 'window';
+    // PWA standalone (Chromium / Safari iOS).
+    if (window.matchMedia?.('(display-mode: standalone)').matches) return 'app';
+    type N = Navigator & { standalone?: boolean };
+    if ((navigator as N).standalone) return 'app';
+    return 'web';
+  } catch {
+    return 'web';
+  }
+}
+
+const PLATFORM: Platform = detectPlatform();
+const STORAGE_KEY = `${KEY_BASE}.${PLATFORM}`;
+
+/** Exported so non-prefs code (e.g. dashboards / debug overlays) can
+ *  display the active platform without re-running detection. */
+export function activePlatform(): Platform {
+  return PLATFORM;
+}
 
 export function loadPrefs(): ReaderPrefs {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    // Priority: per-platform v3 → cross-platform v2 → v1 legacy.
+    const raw =
+      localStorage.getItem(STORAGE_KEY) ??
+      localStorage.getItem(STORAGE_KEY_V2) ??
+      localStorage.getItem(STORAGE_KEY_V1);
     if (!raw) return { ...DEFAULT_PREFS };
-    const parsed = JSON.parse(raw) as Partial<ReaderPrefs>;
+    const parsed = JSON.parse(raw) as Partial<ReaderPrefs> & {
+      // Legacy enum shapes — we accept and migrate.
+      fontFamily?: unknown;
+      columnWidth?: unknown;
+    };
+
+    // Migrate legacy fontFamily ('serif' | 'sans') → font id.
+    let fontFamily: FontId = DEFAULT_PREFS.fontFamily;
+    if (isFontId(parsed.fontFamily)) {
+      fontFamily = parsed.fontFamily;
+    } else if (parsed.fontFamily === 'sans') {
+      fontFamily = 'han-sans';
+    } else if (parsed.fontFamily === 'serif') {
+      fontFamily = 'wenkai';
+    }
+
+    // Migrate legacy columnWidth ('narrow' | 'normal' | 'wide') → rem.
+    let columnWidth: number = DEFAULT_PREFS.columnWidth;
+    if (typeof parsed.columnWidth === 'number' && Number.isFinite(parsed.columnWidth)) {
+      columnWidth = clamp(parsed.columnWidth, COLUMN_WIDTH.min, COLUMN_WIDTH.max);
+    } else if (parsed.columnWidth === 'narrow') {
+      columnWidth = 32;
+    } else if (parsed.columnWidth === 'wide') {
+      columnWidth = 50;
+    } else if (parsed.columnWidth === 'normal') {
+      columnWidth = 38;
+    }
+
     return {
       theme: parsed.theme && isThemeId(parsed.theme) ? parsed.theme : DEFAULT_PREFS.theme,
-      fontSize: clamp(parsed.fontSize ?? DEFAULT_PREFS.fontSize, 12, 32),
-      fontFamily: parsed.fontFamily === 'sans' ? 'sans' : 'serif',
-      lineHeight: clamp(parsed.lineHeight ?? DEFAULT_PREFS.lineHeight, 1.4, 2.4),
-      columnWidth:
-        parsed.columnWidth === 'narrow' || parsed.columnWidth === 'wide'
-          ? parsed.columnWidth
-          : 'normal',
+      fontSize: clamp(parsed.fontSize ?? DEFAULT_PREFS.fontSize, FONT_SIZE.min, FONT_SIZE.max),
+      fontFamily,
+      lineHeight: clamp(parsed.lineHeight ?? DEFAULT_PREFS.lineHeight, LINE_HEIGHT.min, LINE_HEIGHT.max),
+      columnWidth,
+      pageMode:
+        parsed.pageMode === 'scroll-chapter' || parsed.pageMode === 'scroll-book'
+          ? parsed.pageMode
+          : 'paginated',
+      tocPinned: !!parsed.tocPinned,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -51,12 +271,57 @@ export function savePrefs(p: ReaderPrefs): void {
   }
 }
 
-export function columnMaxWidth(prefs: ReaderPrefs): string {
-  switch (prefs.columnWidth) {
-    case 'narrow': return '34rem';
-    case 'wide':   return '52rem';
-    default:       return '42rem';
+/** Returns the column max-width as a CSS length. We accept both the
+ *  full ReaderPrefs and just a number for callers that already
+ *  resolved the value. */
+export function columnMaxWidth(prefs: ReaderPrefs | number): string {
+  const v = typeof prefs === 'number' ? prefs : prefs.columnWidth;
+  return `${v}rem`;
+}
+
+// Which page modes the format actually supports.
+export function availableModes(format: string): PageMode[] {
+  switch (format) {
+    case 'pdf':
+      return ['paginated', 'scroll-book'];
+    case 'cbz':
+      return ['paginated'];
+    case 'epub':
+      return ['paginated', 'scroll-chapter', 'scroll-book'];
+    default:
+      // TXT / FB2 / MOBI / AZW — anything backed by book_chapters.
+      return ['paginated', 'scroll-chapter', 'scroll-book'];
   }
+}
+
+// Narrow a requested mode to one the format supports.
+export function resolvePageMode(format: string, requested: PageMode): PageMode {
+  const allowed = availableModes(format);
+  if (allowed.includes(requested)) return requested;
+  if (requested.startsWith('scroll')) {
+    if (allowed.includes('scroll-book')) return 'scroll-book';
+    if (allowed.includes('scroll-chapter')) return 'scroll-chapter';
+  }
+  return allowed[0];
+}
+
+/** Snap a number to the nearest `step`, then clamp to bounds. Used by
+ *  the NumericStepper after free-text input so e.g. "1.83" snaps to
+ *  1.85 if step is 0.05. */
+export function snapTo(value: number, step: number, lo: number, hi: number): number {
+  if (!Number.isFinite(value)) return lo;
+  const snapped = Math.round(value / step) * step;
+  // Round to step's decimals to avoid 1.7500000000001 ugliness.
+  const decimals = decimalsOf(step);
+  const rounded = +snapped.toFixed(decimals);
+  return clamp(rounded, lo, hi);
+}
+
+function decimalsOf(step: number): number {
+  if (Number.isInteger(step)) return 0;
+  const s = String(step);
+  const dot = s.indexOf('.');
+  return dot < 0 ? 0 : s.length - dot - 1;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
