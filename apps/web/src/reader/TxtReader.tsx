@@ -178,11 +178,39 @@ export default function TxtReader({
     applyAllHighlights(root, chapterHighlights, notedSet);
 
     if (pageMode === 'paginated') {
-      // Force a layout flush, then read the column track width.
-      const total = root.scrollWidth;
-      const view = root.clientWidth || 1;
-      const pages = Math.max(1, Math.round(total / view));
-      setPageCount(pages);
+      // CSS multicol pagination: the column-track lives on the
+      // proseRef's PARENT (the div with columnWidth:100% / columnFill:
+      // auto inside PaginatedFrame). proseRef itself is just a single
+      // block element being flowed into columns — its own scrollWidth
+      // reports a single column width, which is why a naive
+      // root.scrollWidth read collapses pageCount to 1 and makes the
+      // reader jump to the next chapter on page 1.
+      const track = root.parentElement as HTMLElement | null;
+      // First-pass measurement (covers the common case).
+      if (track) {
+        const total = track.scrollWidth;
+        const view = track.clientWidth || 1;
+        setPageCount(Math.max(1, Math.round(total / view)));
+      } else {
+        setPageCount(1);
+      }
+      // Second-pass after the browser has applied multicol layout —
+      // font swap / image decode / highlight wrapping all happen
+      // mid-frame, so we re-measure on the next frame.
+      const raf = requestAnimationFrame(() => {
+        const t = root.parentElement as HTMLElement | null;
+        if (!t) return;
+        const total = t.scrollWidth;
+        const view = t.clientWidth || 1;
+        const pages = Math.max(1, Math.round(total / view));
+        setPageCount(pages);
+        setPageIdx(i => Math.min(i, pages - 1));
+      });
+      if (!readyFiredRef.current) {
+        readyFiredRef.current = true;
+        onReady?.();
+      }
+      return () => cancelAnimationFrame(raf);
     } else {
       setPageCount(1);
     }
@@ -201,8 +229,12 @@ export default function TxtReader({
     const onResize = () => {
       const root = proseRef.current;
       if (!root) return;
-      const total = root.scrollWidth;
-      const view = root.clientWidth || 1;
+      // Same trick as the layout effect: measure the multicol parent,
+      // not the inner block (which is one column wide).
+      const track = root.parentElement as HTMLElement | null;
+      if (!track) return;
+      const total = track.scrollWidth;
+      const view = track.clientWidth || 1;
       const pages = Math.max(1, Math.round(total / view));
       setPageCount(pages);
       setPageIdx(i => Math.min(i, pages - 1));

@@ -194,23 +194,34 @@ export default function ReaderPage() {
   const handleSelection = useCallback((text: string | null) => setSelectedText(text), []);
 
   // Wrap setPrefs so that any change synthesises a brief busy window.
-  // 280 ms is long enough for a paginated EPUB to re-flow on a slow
-  // device, and short enough to feel snappy for the no-op cases.
+  // ~600 ms is long enough for a paginated EPUB to re-flow + measure
+  // pagination on a slow device, and short enough to feel snappy.
   const handlePrefsChange = useCallback((next: ReaderPrefs) => {
     setPrefs(next);
-    setPrefsChangeBusyUntil(performance.now() + 280);
+    setPrefsChangeBusyUntil(performance.now() + 600);
     // Schedule a re-render at the busy-until deadline so the modal
     // reliably closes. We use a state setter that's a no-op except
     // for the re-render side effect.
-    setTimeout(() => forceRender(t => t + 1), 290);
+    setTimeout(() => forceRender(t => t + 1), 620);
   }, []);
 
-  // The blocking modal is open if the book hasn't reported ready yet,
-  // OR the reader is currently busy re-rendering, OR we just changed
-  // prefs and the synthetic busy window is still active.
+  // The blocking modal is open ONLY in two well-defined states:
+  //   1. We have a book record but the reader hasn't reported ready
+  //      (initial load — opening the book engine).
+  //   2. The user just changed reader prefs and we're inside the
+  //      synthetic re-render window so the screen doesn't flicker
+  //      mid-flow.
+  //
+  // Crucially we DO NOT key on `readerBusy` here. readerBusy fires on
+  // every chapter navigation (network fetch + re-render) and the
+  // previous wiring meant any subsequent epub.js relocate-induced
+  // re-display would pop the modal back open and never let go,
+  // because the EPUB reader entered a feedback loop with itself.
+  // After the initial load, the user should never see a blocking
+  // modal again until they touch settings.
+  void readerBusy;
   const modalOpen =
     (!!book && !cantParse && !bookReady) ||
-    readerBusy ||
     performance.now() < prefsChangeBusyUntil;
   const modalLabel = !bookReady ? '正在打开书籍引擎…' : '正在重新渲染…';
 

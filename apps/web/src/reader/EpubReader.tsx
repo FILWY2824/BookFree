@@ -3,28 +3,30 @@
 //
 // Three things this version gets right that the previous one didn't:
 //
-//   1. *Progress restoration*. Mounting now opens the book directly at
-//      `spine[chapterOrd].href`. The first 'relocated' event from
-//      epubjs (which fires immediately at index 0 before the display
-//      promise resolves) is suppressed via a one-shot ref guard so we
-//      never overwrite the saved chapter ord with 0.
+//   1. *No re-render loop on navigation*. The previous version captured
+//      the saved chapter ord into `initialOrdRef` once at mount and
+//      compared every later chapterOrd against it. As soon as the user
+//      flipped past the saved chapter, the chapterOrd-effect saw
+//      "current ≠ initial" forever and re-fired `r.display()` on every
+//      page flip — which fires `onBusy(true)` and pops the
+//      "正在重新渲染" modal mid-read for no reason. We now track the
+//      *last seen* ord, updated both when we display() ourselves and
+//      when epub.js reports a relocate. The effect only re-displays
+//      when the prop differs from what's already on screen.
 //
-//   2. *Reader-busy signalling*. Whenever epubjs is rendering — first
-//      paint, theme change, chapter jump — we flip onBusy(true) so the
-//      ReaderPage's blocking modal can stay up until the rendition is
-//      ready. We use the rendition's own 'rendered' event for this.
+//   2. *Wheel flips work everywhere on the page*, not just over the
+//      parent-level click zones. Events inside an iframe never bubble
+//      to the parent, so the previous version only flipped on wheel
+//      when the cursor was over the left/right zones. We now install
+//      attachWheelPager inside each rendered iframe document on the
+//      'rendered' event, so wheel-on-the-prose flips just like
+//      wheel-on-the-zone.
 //
-//   3. *Selection reporting*. We listen for 'selected' on the
-//      rendition, pull the selected text out of the iframe, and bubble
-//      it up via onSelection so the host can show the selection
-//      toolbar even though epubjs renders inside an iframe we don't
-//      directly own.
-//
-// We deliberately keep highlight wiring out of EpubReader for now — the
-// host only mounts the floating SelectionToolbar in chapter-based
-// readers (TxtReader). Doing range overlays inside the epubjs iframe
-// requires their CFI annotation API and a separate rendering pipeline,
-// which is a larger surface area than fits this milestone.
+//   3. *Font selection actually changes the typeface*. Most EPUB
+//      stylesheets put `font-family` directly on `p`, `div`, etc.,
+//      which beat our `body, html` rule. We now apply the family to
+//      every selector with !important so the picker has authority
+//      over the embedded styles.
 //
 // pageMode handling:
 //   • 'paginated' → epubjs flow: 'paginated' (default e-reader feel)
@@ -35,7 +37,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReaderPrefs, PageMode } from '../lib/prefs';
 import { fontFamilyOf } from '../lib/prefs';
-import PageNav from '../components/PageNav';
+import PageNav, { attachWheelPager } from '../components/PageNav';
 
 interface Props {
   bookId: string;
@@ -70,6 +72,11 @@ interface EpubRendition {
   destroy(): void;
 }
 
+type IframeContents = {
+  window?: Window;
+  document?: Document;
+};
+
 export default function EpubReader({
   bookId, prefs, chapterOrd, pageMode,
   onLocationChange, onReady, onBusy, onSelection,
@@ -83,11 +90,47 @@ export default function EpubReader({
   // navigation are indistinguishable. We swallow exactly one event,
   // which is the one fired by our initial display() call.
   const initialRelocateRef = useRef(true);
+  // Tracks the most recent chapter ord that's actually on screen — set
+  // when we call display() ourselves AND when epub.js reports a
+  // relocate from user navigation. The chapter-effect uses this to
+  // decide whether the prop change reflects a real TOC click (different
+  // from on-screen → re-display) or a feedback loop from our own
+  // relocate handler (same as on-screen → no-op).
+  const lastSeenOrdRef = useRef(chapterOrd);
   const [error, setError] = useState<string | null>(null);
-  // Initial chapter is captured once at mount and ignored thereafter —
-  // the chapterOrd-changed effect handles user TOC clicks. Without
-  // this, every chapterOrd change would force a full book re-init.
-  const initialOrdRef = useRef(chapterOrd);
+  // Refs to the live callbacks so the wheel handler installed in the
+  // iframe can call the latest functions without re-installing each
+  // time props change.
+  const onPrevRef = useRef<() => void>(() => {});
+  const onNextRef = useRef<() => void>(() => {});
+
+  // Each iframe we've installed a wheel handler on, with its teardown.
+  // We rely on epub.js to dispose of old iframes; we just make sure
+  // we don't install twice on the same one.
+  const wheelTeardownsRef = useRef<Map<Document, () => void>>(new Map());
+
+  function installIframeHandlers(contents: IframeContents | undefined) {
+    const doc = contents?.document;
+    if (!doc) return;
+    if (wheelTeardownsRef.current.has(doc)) return;
+    const teardown = attachWheelPager(doc, {
+      onPrev: () => onPrevRef.current(),
+      onNext: () => onNextRef.current(),
+      canPrev: () => true,
+      canNext: () => true,
+      // The iframe documents we render don't have meaningful nested
+      // scrollables for paginated reading.
+      respectScrollables: false,
+    });
+    wheelTeardownsRef.current.set(doc, teardown);
+  }
+
+  function uninstallAllIframeHandlers() {
+    for (const teardown of wheelTeardownsRef.current.values()) {
+      try { teardown(); } catch { /* ignore */ }
+    }
+    wheelTeardownsRef.current.clear();
+  }
 
   // Mount + destroy. Only re-runs when bookId changes.
   useEffect(() => {
@@ -118,48 +161,11 @@ export default function EpubReader({
         });
         renditionRef.current = rendition;
         applyTheme(rendition, prefs);
-
-        // Wire selection BEFORE display so the first chapter's iframe
-        // already has the listener attached when its DOM appears.
-        rendition.on('selected', (...args: unknown[]) => {
-          const cfi = args[0];
-          const contents = args[1] as
-            | { window?: Window; document?: Document }
-            | undefined;
-          // contents.window.getSelection() returns the selection inside
-          // the rendition's sandboxed iframe.
-          const sel = contents?.window?.getSelection?.();
-          const text = sel ? sel.toString() : '';
-          // Surface a non-empty selection so the host can decide what
-          // to do with it (currently: ignore — Epub annotations are a
-          // future extension. The cfi parameter is plumbed through for
-          // when we wire highlights into the iframe).
-          void cfi;
-          onSelection?.(text && text.trim().length > 0 ? text : null);
-        });
-
-        rendition.on('relocated', (...args: unknown[]) => {
-          // Suppress the first relocate so we don't overwrite the
-          // saved chapter ord with the index of where we just told
-          // epubjs to land.
-          if (initialRelocateRef.current) {
-            initialRelocateRef.current = false;
-            return;
-          }
-          const loc = args[0] as { start?: { index?: number } } | undefined;
-          const idx = loc?.start?.index;
-          if (typeof idx === 'number') onLocationChange(idx);
-        });
-
-        rendition.on('rendered', () => {
-          // Each chapter render finishes here. We mute the busy flag
-          // so the modal closes; the host re-arms it on theme/chapter
-          // change via the prefs / chapterOrd effects below.
-          if (!cancelled) onBusy?.(false);
-        });
+        wireRenditionEvents(rendition);
 
         // Open at the saved chapter ord.
-        const target = book.spine.items[initialOrdRef.current];
+        const initialOrd = lastSeenOrdRef.current;
+        const target = book.spine.items[initialOrd];
         await rendition.display(target?.href ?? undefined);
 
         if (!cancelled) {
@@ -176,6 +182,7 @@ export default function EpubReader({
 
     return () => {
       cancelled = true;
+      uninstallAllIframeHandlers();
       try { renditionRef.current?.destroy(); } catch { /* ignore */ }
       try { bookRef.current?.destroy(); } catch { /* ignore */ }
       renditionRef.current = null;
@@ -185,15 +192,19 @@ export default function EpubReader({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
 
-  // React to TOC clicks: jump to spine[chapterOrd]. Skips the synthetic
-  // first run because initialOrdRef captures it.
+  // React to TOC clicks: jump to spine[chapterOrd]. We only re-display
+  // when the prop disagrees with what's actually on screen, which is
+  // tracked in lastSeenOrdRef. Without that guard, every navigation
+  // triggered a re-display and re-rendered the same chapter, which is
+  // what was popping the "正在重新渲染" modal during normal reading.
   useEffect(() => {
-    if (chapterOrd === initialOrdRef.current) return;
+    if (chapterOrd === lastSeenOrdRef.current) return;
     const r = renditionRef.current;
     const b = bookRef.current;
     if (!r || !b) return;
     const item = b.spine.items[chapterOrd];
     if (!item) return;
+    lastSeenOrdRef.current = chapterOrd;
     onBusy?.(true);
     r.display(item.href).catch(() => { /* swallow */ });
   }, [chapterOrd, onBusy]);
@@ -221,6 +232,7 @@ export default function EpubReader({
     const old = renditionRef.current;
     if (!b || !old || !containerRef.current) return;
     onBusy?.(true);
+    uninstallAllIframeHandlers();
     try { old.destroy(); } catch { /* ignore */ }
     const flow = pageMode === 'paginated' ? 'paginated' : 'scrolled-doc';
     const rendition = b.renderTo(containerRef.current, {
@@ -232,34 +244,65 @@ export default function EpubReader({
     });
     renditionRef.current = rendition;
     applyTheme(rendition, prefs);
-
-    rendition.on('selected', (...args: unknown[]) => {
-      const contents = args[1] as { window?: Window } | undefined;
-      const sel = contents?.window?.getSelection?.();
-      const text = sel ? sel.toString() : '';
-      onSelection?.(text && text.trim().length > 0 ? text : null);
-    });
-    rendition.on('relocated', (...args: unknown[]) => {
-      if (initialRelocateRef.current) {
-        initialRelocateRef.current = false;
-        return;
-      }
-      const loc = args[0] as { start?: { index?: number } } | undefined;
-      const idx = loc?.start?.index;
-      if (typeof idx === 'number') onLocationChange(idx);
-    });
-    rendition.on('rendered', () => onBusy?.(false));
+    wireRenditionEvents(rendition);
 
     initialRelocateRef.current = true;
-    const target = b.spine.items[chapterOrd];
+    const target = b.spine.items[lastSeenOrdRef.current];
     rendition.display(target?.href ?? undefined).catch(() => onBusy?.(false));
   // We intentionally only rerun this when pageMode flips. chapterOrd
   // changes are handled by their own effect.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageMode]);
 
+  // Wire up rendition lifecycle events. Extracted because we need
+  // identical wiring on initial mount AND on pageMode-driven re-init.
+  function wireRenditionEvents(rendition: EpubRendition) {
+    rendition.on('selected', (...args: unknown[]) => {
+      const contents = args[1] as IframeContents | undefined;
+      const sel = contents?.window?.getSelection?.();
+      const text = sel ? sel.toString() : '';
+      onSelection?.(text && text.trim().length > 0 ? text : null);
+    });
+
+    rendition.on('relocated', (...args: unknown[]) => {
+      // Suppress the very first relocate (the one for our own initial
+      // display() call) so we don't overwrite the saved chapter ord.
+      if (initialRelocateRef.current) {
+        initialRelocateRef.current = false;
+        return;
+      }
+      const loc = args[0] as { start?: { index?: number } } | undefined;
+      const idx = loc?.start?.index;
+      if (typeof idx !== 'number') return;
+      // Update lastSeen FIRST, so the chapter-effect that fires when
+      // onLocationChange propagates the new ord up to ReaderPage will
+      // see (chapterOrd === lastSeenOrdRef.current) and bail without
+      // re-displaying.
+      lastSeenOrdRef.current = idx;
+      onLocationChange(idx);
+    });
+
+    rendition.on('rendered', (...args: unknown[]) => {
+      // args = (section, view); newer epub.js versions pass the
+      // Contents object as args[1] directly. Try a couple of shapes.
+      const view = args[1] as
+        | { contents?: IframeContents; document?: Document; window?: Window }
+        | undefined;
+      const contents: IframeContents | undefined =
+        view?.contents ?? (view?.document ? view as IframeContents : undefined);
+      installIframeHandlers(contents);
+      onBusy?.(false);
+    });
+  }
+
   function prev() { renditionRef.current?.prev().catch(() => { /* */ }); }
   function next() { renditionRef.current?.next().catch(() => { /* */ }); }
+
+  // Keep the ref-stable callbacks pointing at the latest closures so
+  // the in-iframe wheel handler doesn't need to be reinstalled when
+  // props change.
+  onPrevRef.current = prev;
+  onNextRef.current = next;
 
   // In scrolled flow, suppress click zones (the iframe wants the wheel
   // for its own scrolling), but keep the floating buttons for chapter
@@ -297,15 +340,25 @@ function applyTheme(r: EpubRendition, prefs: ReaderPrefs) {
   const bg = cs.getPropertyValue('--reader-bg').trim() || '#FAF7F2';
   const fg = cs.getPropertyValue('--reader-fg').trim() || '#1B2230';
   const family = fontFamilyOf(prefs.fontFamily);
+  // Most EPUB CSS sets font-family on every text element directly, so
+  // a single `body, html { font-family }` rule loses the cascade. We
+  // hit every common text selector with !important so the user's
+  // pick is the one that wins.
+  const familyImportant = `${family} !important`;
 
   r.themes.register('bookfree', {
     'body, html': {
       background: bg,
       color: fg,
-      'font-family': family,
-      'line-height': String(prefs.lineHeight),
+      'font-family': familyImportant,
+      'line-height': String(prefs.lineHeight) + ' !important',
     },
-    'p, li, span, div': {
+    'p, li, span, div, blockquote, td, th, dd, dt, figcaption': {
+      'font-family': familyImportant,
+      color: fg,
+    },
+    'h1, h2, h3, h4, h5, h6': {
+      'font-family': familyImportant,
       color: fg,
     },
     'a': {

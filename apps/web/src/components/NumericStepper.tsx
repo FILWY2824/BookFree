@@ -38,6 +38,10 @@ interface Props {
    *  "rem"). When the input is focused we hide it so the user can
    *  type a clean number. */
   suffix?: string;
+  /** Optional one-line description shown under the row. Used when the
+   *  control's purpose isn't obvious from the label alone (e.g. 栏宽
+   *  could be read as either "column width" or "page margin"). */
+  hint?: string;
   /** Number of decimals to render in the readout. Inferred from
    *  step if omitted. */
   decimals?: number;
@@ -45,7 +49,7 @@ interface Props {
 }
 
 export default function NumericStepper({
-  label, value, min, max, step, suffix, decimals, onChange,
+  label, value, min, max, step, suffix, hint, decimals, onChange,
 }: Props) {
   const dec = decimals ?? decimalsOf(step);
   const [draft, setDraft] = useState<string | null>(null); // null = not editing
@@ -187,6 +191,15 @@ export default function NumericStepper({
           <SvgPlus />
         </button>
       </div>
+
+      {hint && (
+        <div
+          className="text-[11px] mt-1 leading-snug"
+          style={{ color: 'var(--reader-muted)' }}
+        >
+          {hint}
+        </div>
+      )}
     </div>
   );
 }

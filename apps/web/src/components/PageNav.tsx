@@ -45,59 +45,25 @@ export default function PageNav({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Wheel handler — translate scroll to page flips. We accumulate
-  // delta until we cross a threshold, then commit one page and
-  // briefly mute further input so a single trackpad gesture turns
-  // a single page.
+  // Wheel handler — translate scroll to page flips. Each "gesture"
+  // (a contiguous burst of wheel events with no >250 ms gap) flips
+  // exactly one page, no matter how much delta the user accumulates
+  // during it. This stops trackpad inertia or a long mouse-wheel
+  // spin from skipping multiple pages at once, which the previous
+  // implementation (cooldown + accumulator) allowed to leak through.
   useEffect(() => {
     if (!enabled || !interactiveZones) return;
     const el = containerRef.current;
     if (!el) return;
-
-    let accum = 0;
-    let lastFlip = 0;
-    const COOLDOWN_MS = 320;
-    const STEP = 60;
-
-    const onWheel = (e: WheelEvent) => {
-      // Ignore horizontal scroll — usually the user is scrubbing
-      // a code block or a horizontally-overflowing image.
-      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
-      // pdf.js, scroll-mode TxtReader etc. need real scrolling for
-      // their own UX. We only intercept inside paginated readers,
-      // and they pass `interactiveZones=true`. The host reader is
-      // already gated on its own pageMode prop; if the host doesn't
-      // want our wheel behaviour it sets interactiveZones=false.
-
-      // If the target is a scrollable element that *can* still scroll
-      // in the gesture's direction, leave it alone — the user is
-      // probably trying to read a long pre/code block.
-      const target = e.target as HTMLElement | null;
-      const scrollable = target && nearestScrollable(target, el);
-      if (scrollable) {
-        const canScrollMore =
-          (e.deltaY < 0 && scrollable.scrollTop > 0) ||
-          (e.deltaY > 0 && scrollable.scrollTop + scrollable.clientHeight < scrollable.scrollHeight - 1);
-        if (canScrollMore) return;
-      }
-
-      e.preventDefault();
-      accum += e.deltaY;
-      const now = performance.now();
-      if (now - lastFlip < COOLDOWN_MS) return;
-      if (accum >= STEP) {
-        accum = 0;
-        lastFlip = now;
-        if (canNext) onNext();
-      } else if (accum <= -STEP) {
-        accum = 0;
-        lastFlip = now;
-        if (canPrev) onPrev();
-      }
-    };
-
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
+    return attachWheelPager(el, {
+      onPrev,
+      onNext,
+      canPrev: () => canPrev,
+      canNext: () => canNext,
+      // In the parent surface, defer to the nearest scrollable child
+      // so wheel-on-a-pre-block scrolls the block, not the page.
+      respectScrollables: true,
+    });
   }, [enabled, interactiveZones, onPrev, onNext, canPrev, canNext]);
 
   // Keyboard arrows — page-up / page-down / left / right.
@@ -194,4 +160,82 @@ function nearestScrollable(from: HTMLElement, boundary: HTMLElement): HTMLElemen
     el = el.parentElement;
   }
   return null;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// attachWheelPager — exported so non-React surfaces (notably the
+// epub.js iframe) can install the same single-gesture wheel→flip
+// behaviour. Returns a teardown function.
+//
+// Why this lives here:
+//   The user complaint was that wheel-flipping only worked when the
+//   cursor was over the parent-level click zones. For TXT that's a
+//   misperception (events bubble up through normal DOM), but for
+//   EPUB it's literally true — content is in a sandboxed iframe and
+//   wheel events never escape it. The fix is to install a copy of
+//   this same handler inside each rendered iframe document, which
+//   is exactly what EpubReader does on epub.js's 'rendered' event.
+// ─────────────────────────────────────────────────────────────────
+export interface WheelPagerOpts {
+  onPrev: () => void;
+  onNext: () => void;
+  /** Read at event time so updates to canPrev / canNext are seen. */
+  canPrev: () => boolean;
+  canNext: () => boolean;
+  /** When true, wheel events whose target is inside a scrollable
+   *  ancestor that can still scroll in the gesture's direction are
+   *  passed through. Iframes don't need this (they have no nested
+   *  scrollables that matter for the reading surface). */
+  respectScrollables?: boolean;
+}
+
+export function attachWheelPager(
+  target: HTMLElement | Document,
+  opts: WheelPagerOpts,
+): () => void {
+  const QUIET_MS = 250;
+  const STEP = 60;
+  let accum = 0;
+  let lastWheel = 0;
+  let inFlight = false;
+
+  const onWheel = (e: WheelEvent) => {
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+
+    if (opts.respectScrollables) {
+      const t = e.target as HTMLElement | null;
+      const boundary = (target instanceof Document ? target.documentElement : target) as HTMLElement;
+      const scrollable = t && nearestScrollable(t, boundary);
+      if (scrollable) {
+        const canScrollMore =
+          (e.deltaY < 0 && scrollable.scrollTop > 0) ||
+          (e.deltaY > 0 && scrollable.scrollTop + scrollable.clientHeight < scrollable.scrollHeight - 1);
+        if (canScrollMore) return;
+      }
+    }
+
+    e.preventDefault();
+    const now = performance.now();
+    if (now - lastWheel > QUIET_MS) {
+      accum = 0;
+      inFlight = false;
+    }
+    lastWheel = now;
+    if (inFlight) return;
+
+    accum += e.deltaY;
+    if (accum >= STEP) {
+      if (opts.canNext()) opts.onNext();
+      accum = 0;
+      inFlight = true;
+    } else if (accum <= -STEP) {
+      if (opts.canPrev()) opts.onPrev();
+      accum = 0;
+      inFlight = true;
+    }
+  };
+
+  // `as EventListener` cast keeps TS happy across HTMLElement | Document.
+  target.addEventListener('wheel', onWheel as EventListener, { passive: false });
+  return () => target.removeEventListener('wheel', onWheel as EventListener);
 }

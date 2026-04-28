@@ -17,9 +17,15 @@
 // Numeric controls:
 //   • fontSize    — px, 12 .. 32, step 1, default 18
 //   • lineHeight  — multiplier, 1.20 .. 2.60, step 0.05, default 1.85
-//   • columnWidth — rem, 24 .. 60, step 0.5, default 38   (was an
-//                   enum 'narrow'/'normal'/'wide'; now free-form so
-//                   the user can stepper or type any value)
+//   • columnWidth — % of the reading area, 50 .. 100, step 5, default 85.
+//                   Originally an enum ('narrow'/'normal'/'wide'), then
+//                   a rem value (24..60). The rem version was confusing
+//                   because on narrow viewports many values clipped to
+//                   the same visible width; a percentage of the reading
+//                   area is *always* visible — 50% obviously narrower
+//                   than 100% — and matches how users describe the
+//                   control ("how much of the screen the text fills,
+//                   i.e. the inverse of the side margin").
 //
 // fontFamily is now a token id, not a CSS family. The token resolves
 // to a real CSS family stack via FONT_STACKS so we can ship eight
@@ -141,7 +147,10 @@ export function isSerifFont(id: FontId): boolean {
 
 export const FONT_SIZE = { min: 12, max: 32, step: 1 } as const;
 export const LINE_HEIGHT = { min: 1.2, max: 2.6, step: 0.05 } as const;
-export const COLUMN_WIDTH = { min: 24, max: 60, step: 0.5 } as const;
+// 50% .. 100% of the reading area. The lower bound is intentionally
+// not less than 50% — narrower than that is unreadable on phone-class
+// viewports and the user would never end up there on purpose.
+export const COLUMN_WIDTH = { min: 50, max: 100, step: 5 } as const;
 
 // ── Prefs shape ────────────────────────────────────────────────────
 
@@ -160,7 +169,7 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   fontSize: 18,
   fontFamily: 'wenkai',
   lineHeight: 1.85,
-  columnWidth: 38,
+  columnWidth: 85,
   pageMode: 'paginated',
   tocPinned: false,
 };
@@ -234,16 +243,30 @@ export function loadPrefs(): ReaderPrefs {
       fontFamily = 'wenkai';
     }
 
-    // Migrate legacy columnWidth ('narrow' | 'normal' | 'wide') → rem.
+    // Migrate legacy columnWidth.
+    //   • 'narrow'/'normal'/'wide' (v1 enum) → 60 / 80 / 95
+    //   • 24 .. 60 (rem, v2 / early v3)        → mapped to 50 .. 100 %
+    //   • already in 50 .. 100 (current)        → kept as-is.
+    // We detect the rem regime by seeing a value <= 60 that isn't
+    // already in our 50-100 window — i.e. < 50.
     let columnWidth: number = DEFAULT_PREFS.columnWidth;
     if (typeof parsed.columnWidth === 'number' && Number.isFinite(parsed.columnWidth)) {
-      columnWidth = clamp(parsed.columnWidth, COLUMN_WIDTH.min, COLUMN_WIDTH.max);
+      const v = parsed.columnWidth;
+      if (v >= COLUMN_WIDTH.min && v <= COLUMN_WIDTH.max) {
+        columnWidth = clamp(v, COLUMN_WIDTH.min, COLUMN_WIDTH.max);
+      } else if (v >= 24 && v <= 60) {
+        // Legacy rem → percentage. Linear: 24rem→50%, 38rem→80%, 60rem→100%.
+        const pct = Math.round(50 + ((v - 24) / (60 - 24)) * 50);
+        columnWidth = clamp(pct, COLUMN_WIDTH.min, COLUMN_WIDTH.max);
+      } else {
+        columnWidth = clamp(v, COLUMN_WIDTH.min, COLUMN_WIDTH.max);
+      }
     } else if (parsed.columnWidth === 'narrow') {
-      columnWidth = 32;
+      columnWidth = 60;
     } else if (parsed.columnWidth === 'wide') {
-      columnWidth = 50;
+      columnWidth = 95;
     } else if (parsed.columnWidth === 'normal') {
-      columnWidth = 38;
+      columnWidth = 80;
     }
 
     return {
@@ -273,10 +296,12 @@ export function savePrefs(p: ReaderPrefs): void {
 
 /** Returns the column max-width as a CSS length. We accept both the
  *  full ReaderPrefs and just a number for callers that already
- *  resolved the value. */
+ *  resolved the value. The number is interpreted as a percentage of
+ *  the reading area width, so the value is always visible regardless
+ *  of viewport size. */
 export function columnMaxWidth(prefs: ReaderPrefs | number): string {
   const v = typeof prefs === 'number' ? prefs : prefs.columnWidth;
-  return `${v}rem`;
+  return `${v}%`;
 }
 
 // Which page modes the format actually supports.

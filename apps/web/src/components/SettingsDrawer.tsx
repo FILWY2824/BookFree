@@ -143,7 +143,8 @@ export default function SettingsDrawer({ open, prefs, format, onChange, onClose 
                 label="栏宽"
                 value={prefs.columnWidth}
                 min={COLUMN_WIDTH.min} max={COLUMN_WIDTH.max} step={COLUMN_WIDTH.step}
-                suffix="rem"
+                suffix="%"
+                hint="文本占阅读区宽度的比例，越大越靠近屏幕边缘"
                 onChange={v => onChange({ ...prefs, columnWidth: v })}
               />
             </div>
