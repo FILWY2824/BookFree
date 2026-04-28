@@ -301,6 +301,70 @@ func (h *Handler) HandleListAllNotes(w http.ResponseWriter, r *http.Request) {
 	response.OK(w, map[string]any{"notes": out})
 }
 
+// HandleListAllHighlights → GET /api/highlights
+//
+// All highlights / underlines / strikes / wavy across the user's
+// library, ordered most-recent first. Symmetric with HandleListAllNotes
+// — the new "标注与笔记" page consumes both feeds and merges them in
+// the UI by locator. Limit 2000 keeps the response under a few hundred
+// KB on power-user libraries; if a user has more, they probably want
+// the per-book endpoint anyway.
+func (h *Handler) HandleListAllHighlights(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	rows, err := h.DB.QueryContext(r.Context(), `
+		SELECT hl.id, hl.book_id, b.title, hl.chapter_id, hl.page_no,
+		       hl.locator, hl.selected_text, hl.color, hl.style,
+		       hl.created_at, hl.updated_at
+		FROM highlights hl
+		JOIN books b ON b.id = hl.book_id AND b.user_id = hl.user_id
+		WHERE hl.user_id = ? AND hl.deleted_at IS NULL
+		ORDER BY hl.updated_at DESC
+		LIMIT 2000
+	`, user.ID)
+	if err != nil {
+		response.FailSafe(w, "highlights.all", err, http.StatusInternalServerError, h.IsProd)
+		return
+	}
+	defer rows.Close()
+
+	type dto struct {
+		ID           string  `json:"id"`
+		BookID       string  `json:"bookId"`
+		BookTitle    string  `json:"bookTitle"`
+		ChapterID    *string `json:"chapterId,omitempty"`
+		PageNo       *int    `json:"pageNo,omitempty"`
+		Locator      string  `json:"locator"`
+		SelectedText string  `json:"selectedText"`
+		Color        string  `json:"color"`
+		Style        string  `json:"style"`
+		CreatedAt    int64   `json:"createdAt"`
+		UpdatedAt    int64   `json:"updatedAt"`
+	}
+
+	out := make([]dto, 0, 32)
+	for rows.Next() {
+		var d dto
+		var chapter sql.NullString
+		var page sql.NullInt64
+		if err := rows.Scan(&d.ID, &d.BookID, &d.BookTitle, &chapter, &page,
+			&d.Locator, &d.SelectedText, &d.Color, &d.Style,
+			&d.CreatedAt, &d.UpdatedAt); err != nil {
+			response.FailSafe(w, "highlights.all.scan", err, http.StatusInternalServerError, h.IsProd)
+			return
+		}
+		if chapter.Valid {
+			s := chapter.String
+			d.ChapterID = &s
+		}
+		if page.Valid {
+			n := int(page.Int64)
+			d.PageNo = &n
+		}
+		out = append(out, d)
+	}
+	response.OK(w, map[string]any{"highlights": out})
+}
+
 // POST /api/books/{id}/notes
 func (h *Handler) HandleCreateNote(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())

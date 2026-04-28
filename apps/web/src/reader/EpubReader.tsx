@@ -37,6 +37,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReaderPrefs, PageMode } from '../lib/prefs';
 import { fontFamilyOf } from '../lib/prefs';
+import { getThemeColors } from '../lib/themes';
 import PageNav, { attachWheelPager } from '../components/PageNav';
 
 interface Props {
@@ -64,6 +65,11 @@ interface EpubRendition {
   next(): Promise<void>;
   on(ev: string, cb: (...args: unknown[]) => void): void;
   off?(ev: string, cb: (...args: unknown[]) => void): void;
+  /** Recompute pagination for the current container size. epubjs caches
+   *  the iframe dimensions at renderTo time, so we have to call this
+   *  ourselves whenever the layout reflows around it (TOC pin/unpin,
+   *  AI panel pin/unpin, window resize). */
+  resize?(width?: string | number, height?: string | number): void;
   themes: {
     register(name: string, rules: Record<string, Record<string, string>>): void;
     select(name: string): void;
@@ -223,6 +229,40 @@ export default function EpubReader({
     });
   }, [prefs, onBusy]);
 
+  // Re-paginate when the container resizes (TOC pin/unpin, AI panel
+  // pin/unpin, window resize). epubjs caches the iframe dimensions at
+  // renderTo time, so pinning the TOC sidebar shrinks the host element
+  // without telling epubjs about it — content keeps drawing at the
+  // pre-pin width and the right edge bleeds outside the new column,
+  // which is exactly what the user reported.
+  useEffect(() => {
+    const host = containerRef.current;
+    if (!host) return;
+    if (typeof ResizeObserver === 'undefined') return;
+    let lastW = host.clientWidth;
+    let lastH = host.clientHeight;
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      const w = host.clientWidth;
+      const h = host.clientHeight;
+      // Skip sub-pixel jitter from layout settling.
+      if (Math.abs(w - lastW) < 2 && Math.abs(h - lastH) < 2) return;
+      lastW = w;
+      lastH = h;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const r = renditionRef.current;
+        if (!r || typeof r.resize !== 'function') return;
+        try { r.resize('100%', '100%'); } catch { /* epubjs version variance */ }
+      });
+    });
+    ro.observe(host);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, []);
+
   // pageMode change requires us to re-create the rendition because
   // epubjs's flow option is set at renderTo time. We re-init by
   // changing the bookId effect's dependency artificially — the
@@ -312,7 +352,7 @@ export default function EpubReader({
 
   return (
     <div
-      className="h-full relative"
+      className="h-full w-full relative"
       style={{ background: 'var(--reader-bg)', color: 'var(--reader-fg)' }}
     >
       {error && (
@@ -336,30 +376,45 @@ export default function EpubReader({
 }
 
 function applyTheme(r: EpubRendition, prefs: ReaderPrefs) {
-  const cs = getComputedStyle(document.documentElement);
-  const bg = cs.getPropertyValue('--reader-bg').trim() || '#FAF7F2';
-  const fg = cs.getPropertyValue('--reader-fg').trim() || '#1B2230';
+  // Why not getComputedStyle(documentElement)?
+  //   The CSS variables come from a [data-reader-theme="X"] block bound
+  //   to <html>. Setting that attribute is done in a parent component
+  //   effect; this function runs from a child component effect. In
+  //   React 18, child effects fire BEFORE parent effects, so when the
+  //   user changes theme we used to read the OLD --reader-bg / --reader-fg
+  //   values into the iframe, leaving the EPUB content stuck on the
+  //   previous palette while the chrome around it correctly updated.
+  //   Pulling the colors from the typed THEMES table is deterministic
+  //   and order-independent.
+  const colors = getThemeColors(prefs.theme);
+  const bg = colors.bg;
+  const fg = colors.fg;
   const family = fontFamilyOf(prefs.fontFamily);
   // Most EPUB CSS sets font-family on every text element directly, so
   // a single `body, html { font-family }` rule loses the cascade. We
   // hit every common text selector with !important so the user's
-  // pick is the one that wins.
+  // pick is the one that wins. Same goes for color/bg — books often
+  // ship dark grey on white and would beat our themes' palette.
   const familyImportant = `${family} !important`;
+  const fgImportant = `${fg} !important`;
+  const bgImportant = `${bg} !important`;
 
   r.themes.register('bookfree', {
-    'body, html': {
-      background: bg,
-      color: fg,
+    'html, body': {
+      background: bgImportant,
+      color: fgImportant,
       'font-family': familyImportant,
       'line-height': String(prefs.lineHeight) + ' !important',
     },
-    'p, li, span, div, blockquote, td, th, dd, dt, figcaption': {
+    'p, li, span, div, blockquote, td, th, dd, dt, figcaption, section, article': {
       'font-family': familyImportant,
-      color: fg,
+      color: fgImportant,
+      'background-color': 'transparent !important',
     },
     'h1, h2, h3, h4, h5, h6': {
       'font-family': familyImportant,
-      color: fg,
+      color: fgImportant,
+      'background-color': 'transparent !important',
     },
     'a': {
       color: 'var(--reader-accent, #7C5A3A)',

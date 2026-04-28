@@ -131,19 +131,27 @@ func New(deps RouterDeps) http.Handler {
 	mux.Handle("PUT /api/notes/{id}", auth.RequireUser(http.HandlerFunc(nh.HandleUpdateNote)))
 	mux.Handle("DELETE /api/notes/{id}", auth.RequireUser(http.HandlerFunc(nh.HandleDeleteNote)))
 	mux.Handle("GET /api/notes", auth.RequireUser(http.HandlerFunc(nh.HandleListAllNotes)))
+	mux.Handle("GET /api/highlights", auth.RequireUser(http.HandlerFunc(nh.HandleListAllHighlights)))
 
 	// ── Search ────────────────────────────────────────────────────
 	sh := &searchapi.Handler{DB: deps.DB, IsProd: deps.IsProd}
 	mux.Handle("GET /api/search", auth.RequireUser(http.HandlerFunc(sh.HandleSearch)))
 
 	// ── AI chat ────────────────────────────────────────────────────
-	// Server-side proxy to Anthropic. Reads ANTHROPIC_API_KEY from
-	// env. Status returns {configured} unconditionally; chat returns
-	// 501 NOT_CONFIGURED when the key is missing so the client can
-	// show a friendly message.
-	aih := &ai.Handler{DB: deps.DB, IsProd: deps.IsProd}
+	// Server-side proxy. Built-in path uses ANTHROPIC_API_KEY (with
+	// per-user quota + rate limit). Custom-provider path uses the
+	// user's OpenAI-compatible profile.
+	aih := &ai.Handler{DB: deps.DB, IsProd: deps.IsProd, KeyDeriver: deps.KeyDeriver}
 	mux.Handle("GET /api/ai/status", auth.RequireUser(http.HandlerFunc(aih.HandleStatus)))
 	mux.Handle("POST /api/ai/chat", auth.RequireUser(http.HandlerFunc(aih.HandleChat)))
+	mux.Handle("POST /api/ai/test", auth.RequireUser(http.HandlerFunc(aih.HandleTest)))
+	mux.Handle("GET /api/ai/providers", auth.RequireUser(http.HandlerFunc(aih.HandleListProviders)))
+	mux.Handle("POST /api/ai/providers", auth.RequireUser(http.HandlerFunc(aih.HandleCreateProvider)))
+	mux.Handle("PUT /api/ai/providers/{id}", auth.RequireUser(http.HandlerFunc(aih.HandleUpdateProvider)))
+	mux.Handle("DELETE /api/ai/providers/{id}", auth.RequireUser(http.HandlerFunc(aih.HandleDeleteProvider)))
+	mux.Handle("GET /api/ai/providers/{id}/models", auth.RequireUser(http.HandlerFunc(aih.HandleListProviderModels)))
+	mux.Handle("GET /api/ai/limits", auth.RequireUser(http.HandlerFunc(aih.HandleGetLimits)))
+	mux.Handle("PUT /api/ai/limits", auth.RequireAdmin(http.HandlerFunc(aih.HandleSetLimits)))
 
 	// ── /api/* catch-all → 404 JSON instead of HTML ───────────────
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

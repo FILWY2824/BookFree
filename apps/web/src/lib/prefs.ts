@@ -162,6 +162,12 @@ export interface ReaderPrefs {
   columnWidth: number;    // rem (was an enum; now free-form)
   pageMode: PageMode;
   tocPinned: boolean;
+  /** AI assistant panel pinned as a floating card. When pinned the
+   *  panel doesn't take a backdrop and stays visible while the user
+   *  reads — sized small, draggable, parked in the bottom-right by
+   *  default. Distinct from `tocPinned`, which docks the TOC into the
+   *  flex layout instead. */
+  aiPinned?: boolean;
 }
 
 export const DEFAULT_PREFS: ReaderPrefs = {
@@ -172,6 +178,7 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   columnWidth: 85,
   pageMode: 'paginated',
   tocPinned: false,
+  aiPinned: false,
 };
 
 // ── Persistence ────────────────────────────────────────────────────
@@ -227,8 +234,13 @@ export function loadPrefs(): ReaderPrefs {
       localStorage.getItem(STORAGE_KEY_V2) ??
       localStorage.getItem(STORAGE_KEY_V1);
     if (!raw) return { ...DEFAULT_PREFS };
-    const parsed = JSON.parse(raw) as Partial<ReaderPrefs> & {
-      // Legacy enum shapes — we accept and migrate.
+    const parsed = JSON.parse(raw) as Omit<Partial<ReaderPrefs>, 'fontFamily' | 'columnWidth'> & {
+      // Legacy enum shapes — we accept and migrate. Wider type than
+      // ReaderPrefs since older versions stored string enums here, and
+      // a Partial<...> intersection isn't enough to reopen the field
+      // (TS's intersection of `number | undefined` and `unknown` is
+      // still `number | undefined`, which would forbid the string
+      // comparisons below).
       fontFamily?: unknown;
       columnWidth?: unknown;
     };

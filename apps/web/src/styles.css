@@ -627,3 +627,23 @@ body {
   letter-spacing: 0.04em;
   pointer-events: none;
 }
+
+/* Search-result snippets are clamped to 3 lines per user request — the
+   full passage is one click away, the list view stays scannable. */
+.snippet-3-lines {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+/* Keyword highlight inside snippets. Subtle so a long match doesn't
+   visually swamp the surrounding text. Both server-emitted (FTS5
+   <mark>) and client-emitted use this rule. */
+mark {
+  background: rgba(245, 200, 80, 0.4);
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}

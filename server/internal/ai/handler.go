@@ -28,13 +28,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"bookfree/internal/auth"
 	"bookfree/internal/response"
+	"bookfree/internal/security"
 )
 
 const (
@@ -46,8 +49,9 @@ const (
 )
 
 type Handler struct {
-	DB     *sql.DB
-	IsProd bool
+	DB         *sql.DB
+	IsProd     bool
+	KeyDeriver *security.KeyDeriver
 }
 
 // HandleStatus reports whether an AI key is configured server-side.
@@ -77,18 +81,28 @@ type chatRequest struct {
 	// the model knows the selection is the subject of the next user
 	// question rather than just preamble.
 	Excerpt string `json:"excerpt,omitempty"`
+	// Optional book id — currently unused by the proxy, kept on the
+	// wire so future per-book context retrieval (RAG) can hook in
+	// without changing the request shape.
+	BookID    string `json:"bookId,omitempty"`
+	ChapterID string `json:"chapterId,omitempty"`
+	// When set, route to the named user-imported provider instead of
+	// the built-in Anthropic proxy. Lookup scoped to user_id, so a
+	// caller can't reach another user's profile.
+	ProviderID string `json:"providerId,omitempty"`
 }
 
-// HandleChat proxies a chat turn to Anthropic. We deliberately do not
-// stream — the reader UI is happy to wait for a complete answer, and
-// streaming requires SSE plumbing that's not pulling its weight yet.
+// HandleChat proxies a chat turn. By default it uses the server's
+// built-in Anthropic key (ANTHROPIC_API_KEY). If the request specifies
+// a `providerId`, we fall through to the user's custom OpenAI-compatible
+// profile instead — that path bypasses the system quota and rate-limit
+// enforcement (it's the user's own account).
+//
+// We deliberately do not stream — the reader UI is happy to wait for a
+// complete answer, and streaming requires SSE plumbing that's not
+// pulling its weight yet.
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
-	apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
-	if apiKey == "" {
-		response.Fail(w, http.StatusNotImplemented, "NOT_CONFIGURED",
-			"AI 功能尚未启用：服务端未配置 ANTHROPIC_API_KEY")
-		return
-	}
+	user := auth.UserFromContext(r.Context())
 
 	var req chatRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
@@ -99,12 +113,34 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		response.Fail(w, http.StatusBadRequest, response.CodeValidation, "messages 不能为空")
 		return
 	}
-	// Sanity-clamp the message count so a runaway client can't drain
-	// quota with a 10 000-message turn. 32 is plenty for a reader
-	// chat where context is reset per book session.
 	if len(req.Messages) > 32 {
 		req.Messages = req.Messages[len(req.Messages)-32:]
 	}
+
+	// Routing: explicit providerId => user's custom AI; otherwise
+	// fall back to the built-in Anthropic key with quota enforcement.
+	if strings.TrimSpace(req.ProviderID) != "" {
+		h.handleChatViaProvider(w, r, user.ID, req)
+		return
+	}
+
+	apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+	if apiKey == "" {
+		response.Fail(w, http.StatusNotImplemented, "NOT_CONFIGURED",
+			"AI 功能尚未启用：服务端未配置 ANTHROPIC_API_KEY")
+		return
+	}
+	if !canUseSystemAI(r.Context(), h.DB, user.ID) {
+		response.Fail(w, http.StatusTooManyRequests, response.CodeRateLimited,
+			"AI 调用受限：已达额度或速率上限，请稍后再试或在设置中导入自己的 AI")
+		return
+	}
+	h.handleChatViaBuiltin(w, r, user.ID, apiKey, req)
+}
+
+// handleChatViaBuiltin runs the Anthropic-backed chat AND records a
+// usage event so quota math has data to work with.
+func (h *Handler) handleChatViaBuiltin(w http.ResponseWriter, r *http.Request, userID, apiKey string, req chatRequest) {
 
 	// Build the upstream request body. Anthropic accepts a top-level
 	// `system` string + a `messages` array. We attach the excerpt as
@@ -228,6 +264,141 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			Content: answer,
 		},
 	})
+
+	// Best-effort usage logging. We approximate token cost from the
+	// answer length when the upstream didn't return token counts (the
+	// Anthropic v1/messages response in our parsed struct doesn't
+	// include usage). This is enough for the per-user $10 cap to
+	// behave roughly correctly; admin can adjust caps in app_config.
+	approxTokens := len(answer)/4 + 64
+	estCost := float64(approxTokens) / 1000.0 * 0.015
+	_, _ = h.DB.ExecContext(r.Context(), `
+		INSERT INTO ai_usage_events
+		  (id, user_id, provider_label, model, request_kind,
+		   completion_tokens, total_tokens, estimated_cost_usd,
+		   completed, provider_source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'chat', ?, ?, ?, 1, 'system', ?, ?)
+	`, security.RandomID(), userID, "builtin", defaultModel,
+		approxTokens, approxTokens, estCost,
+		time.Now().Unix(), time.Now().Unix())
+}
+
+// chat path that targets a user-imported OpenAI-compatible provider.
+// We bypass the system quota / rate-limit check (the user is paying)
+// but still tag the usage row with provider_source='user' so admin
+// reports can distinguish.
+func (h *Handler) handleChatViaProvider(w http.ResponseWriter, r *http.Request, userID string, req chatRequest) {
+	base, apiKey, ok := h.loadProviderCreds(r, userID, strings.TrimSpace(req.ProviderID))
+	if !ok {
+		response.Fail(w, http.StatusNotFound, response.CodeNotFound, "未找到该 AI 配置")
+		return
+	}
+
+	// Look up which model this profile prefers.
+	var model sql.NullString
+	_ = h.DB.QueryRowContext(r.Context(),
+		`SELECT chat_model FROM ai_provider_profiles WHERE id = ? AND user_id = ?`,
+		req.ProviderID, userID).Scan(&model)
+	chosenModel := strings.TrimSpace(model.String)
+	if chosenModel == "" {
+		chosenModel = "gpt-3.5-turbo"
+	}
+
+	// OpenAI-compatible request shape.
+	type openaiMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	upMsgs := make([]openaiMsg, 0, len(req.Messages)+1)
+	if strings.TrimSpace(req.Excerpt) != "" {
+		excerpt := req.Excerpt
+		if len(excerpt) > 8000 {
+			excerpt = excerpt[:8000] + "…"
+		}
+		upMsgs = append(upMsgs, openaiMsg{
+			Role: "system",
+			Content: "You are a helpful reading companion. Ground your answer in this EXCERPT FROM THE BOOK:\n" + excerpt,
+		})
+	}
+	for _, m := range req.Messages {
+		role := strings.ToLower(strings.TrimSpace(m.Role))
+		if role != "user" && role != "assistant" && role != "system" {
+			role = "user"
+		}
+		c := strings.TrimSpace(m.Content)
+		if c == "" {
+			continue
+		}
+		upMsgs = append(upMsgs, openaiMsg{Role: role, Content: c})
+	}
+	upBody := map[string]any{
+		"model":      chosenModel,
+		"max_tokens": maxTokens,
+		"messages":   upMsgs,
+	}
+	buf, err := json.Marshal(upBody)
+	if err != nil {
+		response.FailSafe(w, "ai.user.marshal", err, http.StatusInternalServerError, h.IsProd)
+		return
+	}
+	upReq, err := NewSafeRequest(r.Context(), base, http.MethodPost, "/chat/completions", buf)
+	if err != nil {
+		response.Fail(w, http.StatusBadRequest, response.CodeValidation, "URL 构造失败：" + err.Error())
+		return
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+	upReq.Header.Set("Authorization", "Bearer "+apiKey)
+	client := SafeHTTPClient(httpTimeout)
+	res, err := client.Do(upReq)
+	if err != nil {
+		response.Fail(w, http.StatusBadGateway, "AI_UPSTREAM",
+			"无法连接到 AI 服务："+sanitizeNetworkErr(err))
+		return
+	}
+	defer res.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode/100 != 2 {
+		response.Fail(w, http.StatusBadGateway, "AI_UPSTREAM",
+			fmt.Sprintf("HTTP %d：%s", res.StatusCode, extractErrorMessage(rb)))
+		return
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rb, &parsed); err != nil {
+		response.Fail(w, http.StatusBadGateway, "AI_UPSTREAM", "上游返回无法解析")
+		return
+	}
+	answer := ""
+	if len(parsed.Choices) > 0 {
+		answer = strings.TrimSpace(parsed.Choices[0].Message.Content)
+	}
+	if answer == "" {
+		answer = "(模型未返回内容)"
+	}
+	response.OK(w, map[string]any{
+		"message": chatMessage{Role: "assistant", Content: answer},
+	})
+
+	_, _ = h.DB.ExecContext(r.Context(), `
+		INSERT INTO ai_usage_events
+		  (id, user_id, provider_label, model, request_kind,
+		   prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd,
+		   completed, provider_source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'chat', ?, ?, ?, 0, 1, 'user', ?, ?)
+	`, security.RandomID(), userID, "user", chosenModel,
+		parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens, parsed.Usage.TotalTokens,
+		time.Now().Unix(), time.Now().Unix())
 }
 
 // extractErrorMessage tries to pull a helpful string out of an

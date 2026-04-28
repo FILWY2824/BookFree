@@ -34,6 +34,11 @@ const ICON_NOTES = (
     <line x1="9" y1="17" x2="13" y2="17" />
   </svg>
 );
+const ICON_AI = (
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+  </svg>
+);
 const ICON_STATS = (
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
     <line x1="12" y1="20" x2="12" y2="10" />
@@ -51,8 +56,9 @@ const ICON_SETTINGS = (
 const NAV: NavItem[] = [
   { to: '/library',  label: '书架',     icon: ICON_LIB },
   { to: '/search',   label: '全文搜索', icon: ICON_SEARCH },
-  { to: '/notes',    label: '笔记',     icon: ICON_NOTES },
-  { to: '/stats',    label: '统计',     icon: ICON_STATS },
+  { to: '/notes',    label: '标注与笔记', icon: ICON_NOTES },
+  { to: '/ai',       label: 'AI 对话',  icon: ICON_AI },
+  { to: '/stats',    label: '阅读统计', icon: ICON_STATS },
   { to: '/settings', label: '设置',     icon: ICON_SETTINGS },
 ];
 

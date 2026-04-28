@@ -222,25 +222,34 @@ export default function TxtReader({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [html, body, highlights, notes, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth]);
 
-  // Recompute pagination on resize so window-snap doesn't strand the
-  // user mid-page.
+  // Recompute pagination on resize so layout changes don't strand the
+  // user mid-page. We use ResizeObserver instead of just `resize` on
+  // window because pinning the TOC drawer or the AI panel changes the
+  // reader column width without the window itself resizing.
   useEffect(() => {
     if (pageMode !== 'paginated') return;
-    const onResize = () => {
-      const root = proseRef.current;
-      if (!root) return;
-      // Same trick as the layout effect: measure the multicol parent,
-      // not the inner block (which is one column wide).
-      const track = root.parentElement as HTMLElement | null;
-      if (!track) return;
-      const total = track.scrollWidth;
-      const view = track.clientWidth || 1;
+    const root = proseRef.current;
+    const track = root?.parentElement as HTMLElement | null;
+    if (!root || !track) return;
+    const recompute = () => {
+      const t = root.parentElement as HTMLElement | null;
+      if (!t) return;
+      const total = t.scrollWidth;
+      const view = t.clientWidth || 1;
       const pages = Math.max(1, Math.round(total / view));
       setPageCount(pages);
       setPageIdx(i => Math.min(i, pages - 1));
     };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    window.addEventListener('resize', recompute);
+    let ro: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(recompute);
+      ro.observe(track);
+    }
+    return () => {
+      window.removeEventListener('resize', recompute);
+      ro?.disconnect();
+    };
   }, [pageMode]);
 
   const canPrevChapter = chapterOrd > 0;

@@ -26,7 +26,7 @@
 //   the click registered. The modal closes either when the reader
 //   reports `busy=false` again or after a short safety timeout.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { api, ApiException } from '../lib/api';
 import { loadPrefs, savePrefs, resolvePageMode, type ReaderPrefs } from '../lib/prefs';
@@ -371,12 +371,24 @@ export default function ReaderPage() {
       )}
 
       <AIChatPanel
-        open={aiOpen}
-        onClose={() => setAiOpen(false)}
+        open={aiOpen || !!prefs.aiPinned}
+        onClose={() => {
+          setAiOpen(false);
+          if (prefs.aiPinned) handlePrefsChange({ ...prefs, aiPinned: false });
+        }}
         bookId={book.id}
         bookTitle={book.title}
         chapterTitle={chapters[chapterOrd]?.title ?? undefined}
         selectedText={selectedText}
+        pinned={!!prefs.aiPinned}
+        onTogglePin={() => {
+          const next = !prefs.aiPinned;
+          handlePrefsChange({ ...prefs, aiPinned: next });
+          // Pinning the panel implicitly opens it; unpinning leaves it
+          // visible but in drawer mode (so the user can dismiss with
+          // backdrop click as before).
+          if (next) setAiOpen(true);
+        }}
       />
 
       <BlockingModal open={modalOpen} label={modalLabel} />

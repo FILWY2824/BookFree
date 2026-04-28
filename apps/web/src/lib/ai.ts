@@ -24,6 +24,10 @@ export interface AIChatRequest {
    *  message in a clearly-labelled block so the model doesn't have to
    *  guess what's being asked about. */
   excerpt?: string | null;
+  /** When set, route to a user-imported AI provider profile instead
+   *  of the server's built-in proxy. Server resolves this against
+   *  ai_provider_profiles scoped to the current user. */
+  providerId?: string;
   messages: AIMessage[];
 }
 
