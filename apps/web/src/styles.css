@@ -647,3 +647,47 @@ mark {
   padding: 0 1px;
   border-radius: 2px;
 }
+
+/* In-reader keyword flash. Used by the search-result jump path: when
+   the user clicks a hit, the reader walks the rendered chapter, wraps
+   each occurrence of the keyword in <mark.search-flash>, and removes
+   the wrappers after 3 seconds. Stronger contrast than the snippet
+   <mark> rule because the prose is competing for attention. */
+mark.search-flash {
+  background: rgba(255, 200, 0, 0.7);
+  box-shadow: 0 0 0 2px rgba(255, 200, 0, 0.55);
+  color: inherit;
+  padding: 0 2px;
+  border-radius: 3px;
+  animation: search-flash-pulse 0.9s ease-out 2;
+}
+@keyframes search-flash-pulse {
+  0%   { box-shadow: 0 0 0 2px rgba(255, 200, 0, 0.55); }
+  50%  { box-shadow: 0 0 0 4px rgba(255, 200, 0, 0.3);  }
+  100% { box-shadow: 0 0 0 2px rgba(255, 200, 0, 0.55); }
+}
+
+/* Header colour swatches — placed to the left of the AI icon. The
+   active swatch is ringed with the reader's accent so the picked
+   colour reads at a glance regardless of theme. */
+.header-color-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+  padding: 0;
+}
+.header-color-swatch:hover {
+  transform: scale(1.12);
+}
+.header-color-swatch[data-active="1"] {
+  box-shadow: 0 0 0 2px var(--reader-bg), 0 0 0 4px var(--reader-accent);
+  transform: scale(1.05);
+}
+[data-reader-theme="forest"] .header-color-swatch,
+[data-reader-theme="slate"]  .header-color-swatch,
+[data-reader-theme="dark"]   .header-color-swatch {
+  border-color: rgba(255, 255, 255, 0.25);
+}

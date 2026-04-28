@@ -7,7 +7,7 @@
 // If no markers match we treat the whole file as one chapter — still
 // readable, still ingests cleanly into FTS5, just no TOC.
 
-import { type ChapterIn, type ChunkIn, type IngestPayload, chunkText, shortId } from './index';
+import { type ChapterIn, type ChunkIn, type IngestPayload, type TocItemIn, chunkText, shortId } from './index';
 
 export async function parseTxt(file: File): Promise<IngestPayload> {
   const buf = await file.arrayBuffer();
@@ -17,19 +17,22 @@ export async function parseTxt(file: File): Promise<IngestPayload> {
   const chapters = splitChapters(text);
   const chapterIns: ChapterIn[] = [];
   const chunkIns: ChunkIn[] = [];
+  const toc: TocItemIn[] = [];
   let chunkOrd = 0;
 
   chapters.forEach((c, idx) => {
     const cid = shortId('c');
+    const label = c.title || `第 ${idx + 1} 章`;
     chapterIns.push({
       id: cid,
       ord: idx,
-      title: c.title || `第 ${idx + 1} 章`,
+      title: label,
       text: c.body,
       // We synthesize a tiny HTML version for the reader so it can
       // share the same .reader-prose CSS as EPUB content.
       html: textToBasicHTML(c.body),
     });
+    toc.push({ label, chapterId: cid, depth: 0 });
     for (const piece of chunkText(c.body)) {
       chunkIns.push({
         id: shortId('k'),
@@ -45,6 +48,7 @@ export async function parseTxt(file: File): Promise<IngestPayload> {
     title,
     chapters: chapterIns,
     chunks: chunkIns,
+    toc,
   };
 }
 

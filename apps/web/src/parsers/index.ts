@@ -45,6 +45,18 @@ export interface ChunkIn {
   text: string;
 }
 
+// One node in the hierarchical table of contents. The `chapterId`,
+// when present, MUST match a `ChapterIn.id` in the same payload — the
+// server resolves it to the scoped DB id during ingest. Heading-only
+// entries (e.g. "Part I" wrappers) MAY omit chapterId; the TocDrawer
+// still renders them as non-navigable section labels.
+export interface TocItemIn {
+  label: string;
+  chapterId?: string;
+  depth?: number;
+  children?: TocItemIn[];
+}
+
 export interface IngestPayload {
   title?: string;
   authors?: string[];
@@ -52,6 +64,11 @@ export interface IngestPayload {
   publisher?: string;
   chapters: ChapterIn[];
   chunks: ChunkIn[];
+  /** Hierarchical TOC. When omitted/empty, the server falls back to
+   *  rendering chapters as a flat list. We always populate this for
+   *  EPUB / MOBI / FB2 (the formats that carry a real TOC); TXT and
+   *  CBZ leave it empty since their structure is already flat. */
+  toc?: TocItemIn[];
 }
 
 // Formats that produce ingest payloads on the client. PDF skips this

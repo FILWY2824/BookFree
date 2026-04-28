@@ -33,6 +33,7 @@ interface ChunkHit {
   id: string;
   bookId: string;
   bookTitle: string;
+  chapterId?: string | null;
   chapterTitle?: string | null;
   pageNo?: number | null;
   snippet: string;
@@ -44,6 +45,7 @@ interface NoteHit {
   id: string;
   bookId: string;
   bookTitle: string;
+  chapterId?: string | null;
   body: string;
   snippet: string;
   selectedText?: string | null;
@@ -191,7 +193,7 @@ export default function SearchPage() {
             onPage={setChunkPage}
             renderItem={h => (
               <Link
-                to={`/book/${h.bookId}`}
+                to={buildBookLink(h.bookId, committed, h.chapterId)}
                 className="block rounded-lg border border-paper-300/70 hover:border-accent/40 bg-paper-50 px-4 py-3"
               >
                 <div className="text-xs text-ink-500 mb-1">
@@ -217,7 +219,7 @@ export default function SearchPage() {
             onPage={setNotePage}
             renderItem={n => (
               <Link
-                to={`/book/${n.bookId}`}
+                to={buildBookLink(n.bookId, committed, n.chapterId ?? null)}
                 className="block rounded-lg border border-paper-300/70 bg-paper-50 px-4 py-3"
               >
                 <div className="text-xs text-ink-500 mb-1">《{n.bookTitle}》</div>
@@ -240,6 +242,19 @@ export default function SearchPage() {
       )}
     </DashboardChrome>
   );
+}
+
+// Build a /book/<id> link, appending ?q=<keyword>&chapter=<chapterId>
+// when both are available so the reader can flash the keyword in the
+// matching chapter on arrival. Falls back to the bare /book/<id> path
+// for hits that lack chapter context (e.g. a note without a chapterId
+// because the highlight was created in PDF mode).
+function buildBookLink(bookId: string, q: string, chapterId: string | null | undefined): string {
+  const base = `/book/${bookId}`;
+  const qt = q.trim();
+  if (!qt || !chapterId) return base;
+  const params = new URLSearchParams({ q: qt, chapter: chapterId });
+  return `${base}?${params.toString()}`;
 }
 
 // PaginatedSection slices `items` into PAGE_SIZE chunks and renders

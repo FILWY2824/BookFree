@@ -23,7 +23,7 @@
 // zip-entry path stored in `href`, and CbzReader uses that path on
 // playback to pull the page from the original file.
 
-import { type IngestPayload, type ChapterIn, type ChunkIn, chunkText, htmlToText, shortId } from './index';
+import { type IngestPayload, type ChapterIn, type ChunkIn, type TocItemIn, chunkText, htmlToText, shortId } from './index';
 import { isMOBI, MOBI } from 'foliate-js/mobi.js';
 import { makeFB2 } from 'foliate-js/fb2.js';
 import { makeComicBook } from 'foliate-js/comic-book.js';
@@ -235,6 +235,9 @@ async function collectBook(book: FoliateBook, filename: string, isComic: boolean
   const chapters: ChapterIn[] = [];
   const chunks: ChunkIn[] = [];
   let chunkOrd = 0;
+  // Maps `spine index → chapter id we just inserted`. We need this in
+  // a second pass to wire the TOC tree's hrefs to chapter ids.
+  const chapterIdBySpineIndex = new Map<number, string>();
 
   for (let i = 0; i < book.sections.length; i++) {
     const sec = book.sections[i];
@@ -265,6 +268,7 @@ async function collectBook(book: FoliateBook, filename: string, isComic: boolean
       html,
       text,
     });
+    chapterIdBySpineIndex.set(i, cid);
 
     for (const piece of chunkText(text)) {
       if (piece.length < 8) continue;
@@ -282,6 +286,11 @@ async function collectBook(book: FoliateBook, filename: string, isComic: boolean
     throw new Error('未能提取出任何章节内容');
   }
 
+  // Build the hierarchical TOC from book.toc, resolving each href to
+  // a spine index → chapter id. Items whose href doesn't resolve
+  // become heading-only (no chapterId) so we don't drop the label.
+  const toc = buildHierarchicalToc(book, chapterIdBySpineIndex);
+
   return {
     title: meta.title,
     authors: meta.authors,
@@ -289,6 +298,7 @@ async function collectBook(book: FoliateBook, filename: string, isComic: boolean
     publisher: meta.publisher,
     chapters,
     chunks,
+    toc,
   };
 }
 
@@ -299,6 +309,7 @@ async function collectComicBook(book: FoliateBook, filename: string): Promise<In
   const meta = extractMetadata(book, filename);
   const chapters: ChapterIn[] = [];
   const chunks: ChunkIn[] = [];
+  const toc: TocItemIn[] = [];
 
   // foliate's makeComicBook stores the page filename on section.id.
   // That's the same name used by the loader, so CbzReader can ask
@@ -324,6 +335,7 @@ async function collectComicBook(book: FoliateBook, filename: string): Promise<In
       ord: i,
       text: `${pageTitle}（图片页）`,
     });
+    toc.push({ label: pageTitle, chapterId: cid, depth: 0 });
   }
 
   if (chapters.length === 0) throw new Error('CBZ 内未找到任何图片页');
@@ -335,6 +347,7 @@ async function collectComicBook(book: FoliateBook, filename: string): Promise<In
     publisher: meta.publisher,
     chapters,
     chunks,
+    toc,
   };
 }
 
@@ -408,6 +421,58 @@ function buildTocIndex(book: FoliateBook): Map<number, string> {
   };
   walk(book.toc);
   return out;
+}
+
+// Build a hierarchical TOC tree by walking book.toc verbatim. This is
+// what the user actually wants in the drawer: nested Part / Chapter /
+// Section labels exactly as the book ships them.
+//
+// Resolution rules:
+//   • If we can resolve href → spine index → chapter id, we attach
+//     chapterId to the node so a click navigates the reader to it.
+//   • If resolveHref fails or no chapter was emitted for that index
+//     (linear="no", empty body), we keep the node as a heading-only
+//     entry — useful for "Part I" wrappers that group children but
+//     don't have body content of their own.
+//   • Items lacking a label are dropped; their children are promoted
+//     up so the hierarchy degrades gracefully.
+function buildHierarchicalToc(
+  book: FoliateBook,
+  chapterIdBySpineIndex: Map<number, string>,
+): TocItemIn[] {
+  if (!book.toc || book.toc.length === 0) return [];
+  const walk = (items: FoliateTocItem[], depth: number): TocItemIn[] => {
+    const out: TocItemIn[] = [];
+    for (const it of items) {
+      const label = (it.label ?? '').trim();
+      const children = it.subitems ? walk(it.subitems, depth + 1) : undefined;
+      if (!label) {
+        // Promote children to the parent level.
+        if (children && children.length) out.push(...children);
+        continue;
+      }
+      let chapterId: string | undefined;
+      if (it.href && book.resolveHref) {
+        try {
+          const r = book.resolveHref(it.href);
+          if (r && typeof r.index === 'number') {
+            const cid = chapterIdBySpineIndex.get(r.index);
+            if (cid) chapterId = cid;
+          }
+        } catch {
+          // fall through — heading-only entry
+        }
+      }
+      out.push({
+        label: label.slice(0, 200),
+        chapterId,
+        depth,
+        children: children && children.length > 0 ? children : undefined,
+      });
+    }
+    return out;
+  };
+  return walk(book.toc, 0);
 }
 
 // Turn the foliate-loaded Document into a self-contained HTML string

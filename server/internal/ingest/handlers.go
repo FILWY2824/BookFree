@@ -59,6 +59,18 @@ type chunkIn struct {
 	Text       string  `json:"text"`
 }
 
+// tocItemIn is the wire shape for a single TOC entry. The tree is
+// arbitrary in depth; "ChapterID" is the parser-side chapter id (the
+// `c.ID` value the SPA emits in `chapters[]`), which we then rewrite
+// to the scoped DB id during persistence so the frontend can navigate
+// directly via /api/books/{id}/chapters/{chapterId}.
+type tocItemIn struct {
+	Label     string      `json:"label"`
+	ChapterID *string     `json:"chapterId,omitempty"`
+	Depth     *int        `json:"depth,omitempty"`
+	Children  []tocItemIn `json:"children,omitempty"`
+}
+
 type ingestBody struct {
 	Title     *string     `json:"title,omitempty"`
 	Authors   []string    `json:"authors,omitempty"`
@@ -66,6 +78,7 @@ type ingestBody struct {
 	Publisher *string     `json:"publisher,omitempty"`
 	Chapters  []chapterIn `json:"chapters"`
 	Chunks    []chunkIn   `json:"chunks"`
+	TOC       []tocItemIn `json:"toc,omitempty"`
 }
 
 // max body size for an ingest payload. Real-world EPUB ingest payloads
@@ -221,6 +234,21 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 			authorsJSON = string(b)
 		}
 	}
+
+	// Persist the hierarchical TOC. We rewrite each item's chapterId
+	// from the parser-side handle to the DB-scoped id we just inserted,
+	// so a TocDrawer click can hit /api/books/{id}/chapters/{chapterId}
+	// directly. Items whose chapterId doesn't resolve are kept (their
+	// label is still useful as a heading), with chapterId left empty so
+	// the UI can render them as non-navigable section dividers.
+	var tocJSON sql.NullString
+	if len(body.TOC) > 0 {
+		remapped := remapTocChapterIDs(body.TOC, chapterIDs, 0)
+		if b, err := json.Marshal(remapped); err == nil {
+			tocJSON = sql.NullString{String: string(b), Valid: true}
+		}
+	}
+
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE books
 		SET status     = 'ready',
@@ -228,6 +256,7 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		    authors    = ?,
 		    language   = COALESCE(?, language),
 		    publisher  = COALESCE(?, publisher),
+		    toc        = ?,
 		    error      = NULL,
 		    updated_at = ?
 		WHERE id = ? AND user_id = ?
@@ -236,6 +265,7 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		authorsJSON,
 		nullStrPtr(body.Language),
 		nullStrPtr(body.Publisher),
+		tocJSON,
 		now, bookID, user.ID); err != nil {
 		response.FailSafe(w, "ingest.update_book", err, http.StatusInternalServerError, h.IsProd)
 		return
@@ -314,6 +344,54 @@ func scopedIngestID(bookID, kind, raw string, ord int) string {
 		raw = strconv.Itoa(ord)
 	}
 	return bookID + ":" + kind + ":" + raw
+}
+
+// tocItemOut is the shape we write to books.toc. We strip the parser-
+// side chapter handles and replace them with the DB-scoped ids the
+// frontend uses for navigation. The on-disk JSON is intentionally
+// permissive: we keep the depth field even though it's redundant with
+// nesting, so a future denormalised renderer can read a flat list
+// without re-walking the tree.
+type tocItemOut struct {
+	Label     string       `json:"label"`
+	ChapterID *string      `json:"chapterId,omitempty"`
+	Depth     int          `json:"depth"`
+	Children  []tocItemOut `json:"children,omitempty"`
+}
+
+// remapTocChapterIDs walks the user-supplied tree, swapping each
+// parser-side chapter id for the matching DB-scoped id. Items whose
+// chapterId is missing or doesn't resolve keep the label only; this
+// is normal for "Part I" style headings that don't correspond to a
+// readable section.
+func remapTocChapterIDs(items []tocItemIn, chapterIDs map[string]string, depth int) []tocItemOut {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]tocItemOut, 0, len(items))
+	for _, it := range items {
+		label := strings.TrimSpace(it.Label)
+		if label == "" {
+			// Drop unlabelled entries entirely — they'd render as blank
+			// rows. Their children, if any, are promoted up so the
+			// hierarchy degrades gracefully instead of orphaning content.
+			out = append(out, remapTocChapterIDs(it.Children, chapterIDs, depth)...)
+			continue
+		}
+		var mapped *string
+		if it.ChapterID != nil {
+			if id, ok := chapterIDs[*it.ChapterID]; ok {
+				mapped = &id
+			}
+		}
+		out = append(out, tocItemOut{
+			Label:     label,
+			ChapterID: mapped,
+			Depth:     depth,
+			Children:  remapTocChapterIDs(it.Children, chapterIDs, depth+1),
+		})
+	}
+	return out
 }
 
 func nullStr(s *string) any {

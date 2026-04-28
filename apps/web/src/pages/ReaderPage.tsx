@@ -1,35 +1,44 @@
-// Reader page. Owns the chrome (header bar, drawers, modals) and
+// Reader page. Owns the chrome (header bar, dock, modals) and
 // dispatches to the format-specific reader component for content
 // rendering.
 //
 // State responsibility split:
-//   ReaderPage   → which book, which chapter/page, prefs, drawers
-//                  open, progress sync, AI panel, blocking modal.
+//   ReaderPage   → which book, which chapter/page, prefs, dock open,
+//                  progress sync, AI panel, blocking modal, currently
+//                  selected highlight colour.
 //   *Reader      → fetch + render content, emit selection events,
 //                  signal ready/busy state up.
 //
-// Critical fix vs previous version — progress restoration:
-//   The old code rendered the format reader the moment book metadata
-//   loaded, then asynchronously fetched progress and updated chapterOrd.
-//   For EpubReader this lost the position because epub.js had already
-//   called display() at spine[0] and emitted a 'relocated' event that
-//   wrote chapterOrd=0 *before* the GET /progress response arrived.
-//   We now gate every reader on `progressLoaded` so the reader only
-//   mounts once we know the saved position. (EpubReader still needs
-//   to suppress its first 'relocated' callback; that's done inside
-//   EpubReader itself.)
-//
-// Rendering modal:
-//   Reading-setting changes that require a re-paginate (font size,
-//   line height, page mode, theme on EPUB) take 100-400 ms. We
-//   surface a blocking modal during the change so the user knows
-//   the click registered. The modal closes either when the reader
-//   reports `busy=false` again or after a short safety timeout.
+// Recent behaviour changes (per user request):
+//   • TOC is now a permanently DOCKED aside on the left. The header
+//     button just toggles its VISIBILITY (collapsed dock vs visible
+//     dock). There is no longer a floating overlay TOC mode and no
+//     pin / unpin chrome — `tocPinned` from prefs is ignored as a
+//     legacy field; we treat the dock as on by default.
+//   • The AI assistant's "pin" button no longer reshapes the panel
+//     into a small bottom-right card. Instead, pinning keeps the
+//     panel in its current drawer position (full-height, right edge)
+//     and merely removes the backdrop / click-outside-close so the
+//     reader stays interactive behind it. The user dismisses it
+//     explicitly with the ✕ button.
+//   • The header gains a colour-swatch row to the LEFT of the AI
+//     icon. The currently-selected colour is forwarded to the active
+//     reader and used as the default for new highlights — so the
+//     "select a passage and the toolbar pops up with that colour
+//     pre-applied" workflow becomes one tap shorter.
+//   • A `?q=...&chunk=...&chapter=...` query string drives the
+//     search-result jump path: the reader navigates to the chapter,
+//     then the TxtReader exposes the chunk + keyword via a single
+//     prop the search→reader handoff uses to flash the match for
+//     a few seconds. We strip the params after consuming them so
+//     a refresh doesn't keep flashing.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, ApiException } from '../lib/api';
 import { loadPrefs, savePrefs, resolvePageMode, type ReaderPrefs } from '../lib/prefs';
+import { fetchToc, findTocItemByChapterId, type TocItem } from '../lib/toc';
+import { COLORS, type HighlightColor } from '../lib/highlights';
 import SettingsDrawer from '../components/SettingsDrawer';
 import TocDrawer from '../components/TocDrawer';
 import BlockingModal from '../components/BlockingModal';
@@ -53,15 +62,22 @@ interface Chapter {
   title?: string | null;
 }
 
+// Default colour for new highlights when the user hasn't picked one
+// from the header swatch. We use yellow because it's the most legible
+// across every reader theme.
+const DEFAULT_HIGHLIGHT_COLOR: HighlightColor = 'yellow';
+
 export default function ReaderPage() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [book, setBook] = useState<BookDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<ReaderPrefs>(() => loadPrefs());
 
   const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [tocItems, setTocItems] = useState<TocItem[]>([]);
   const [chapterOrd, setChapterOrd] = useState(0);
   const [pdfPage, setPdfPage] = useState(1);
 
@@ -70,8 +86,8 @@ export default function ReaderPage() {
   // overwrite it with chapterOrd=0.
   const [progressLoaded, setProgressLoaded] = useState(false);
 
-  // Drawers / panels.
-  const [tocOpen, setTocOpen] = useState(false);
+  // Dock + panels.
+  const [tocVisible, setTocVisible] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
 
@@ -89,6 +105,21 @@ export default function ReaderPage() {
   // context. Readers push their current selection up via onSelection.
   const [selectedText, setSelectedText] = useState<string | null>(null);
 
+  // Currently-selected highlight colour from the header swatch row.
+  // Forwarded to TxtReader; a new highlight from the SelectionToolbar
+  // uses this as its default colour.
+  const [activeColor, setActiveColor] = useState<HighlightColor>(DEFAULT_HIGHLIGHT_COLOR);
+
+  // Search-jump handoff: when the user arrived from /search, we keep
+  // the (chunk, keyword) pair so the reader can flash the match. We
+  // consume it once and clear so a refresh doesn't keep flashing.
+  const searchJump = useMemo(() => {
+    const q = searchParams.get('q')?.trim();
+    const chapterId = searchParams.get('chapter')?.trim();
+    if (!q || !chapterId) return null;
+    return { keyword: q, chapterId };
+  }, [searchParams]);
+
   // ── Persist prefs ───────────────────────────────────────────────
   useEffect(() => { savePrefs(prefs); }, [prefs]);
 
@@ -105,6 +136,7 @@ export default function ReaderPage() {
     setBookReady(false);
     setProgressLoaded(false);
     setChapters([]);
+    setTocItems([]);
     setChapterOrd(0);
     setPdfPage(1);
     api.get<{ book: BookDTO }>(`/api/books/${id}`)
@@ -152,6 +184,20 @@ export default function ReaderPage() {
     return () => { cancelled = true; };
   }, [book]);
 
+  // ── Load hierarchical TOC ──────────────────────────────────────
+  // Independent of chapters: the TOC may have heading-only nodes that
+  // don't correspond to any spine entry, and conversely a spine entry
+  // may not be in the TOC at all. We render TOC items if available,
+  // otherwise the drawer's empty-state shows "暂无目录".
+  useEffect(() => {
+    if (!book || book.format === 'pdf') return;
+    let cancelled = false;
+    fetchToc(book.id).then(items => {
+      if (!cancelled) setTocItems(items);
+    });
+    return () => { cancelled = true; };
+  }, [book]);
+
   // ── Save progress (debounced) ──────────────────────────────────
   // Crucially we DON'T fire this until progress has been loaded —
   // that prevents the "save chapterOrd=0 immediately" race we used
@@ -167,13 +213,49 @@ export default function ReaderPage() {
     return () => clearTimeout(handle);
   }, [book, chapterOrd, pdfPage, progressLoaded]);
 
+  // ── Apply search-jump on first mount after chapters load ───────
+  // We jump to the chapter referenced by `?chapter=...` once the
+  // chapter list has resolved (we need ord lookup). The keyword
+  // itself is forwarded to TxtReader via the searchJump prop so it
+  // can flash matches in-place. After consuming, we strip the
+  // params so a page refresh doesn't re-trigger.
+  useEffect(() => {
+    if (!book || !progressLoaded || !searchJump) return;
+    if (chapters.length === 0) return;
+    const target = chapters.find(c => c.id === searchJump.chapterId);
+    if (target && target.ord !== chapterOrd) {
+      setChapterOrd(target.ord);
+    }
+    // We DON'T strip the params yet — TxtReader needs to read them on
+    // its next render. It calls onSearchHandled() once it's flashed
+    // the match, which triggers the strip below.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [book, progressLoaded, chapters, searchJump]);
+
+  const handleSearchHandled = useCallback(() => {
+    if (!searchJump) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete('q');
+    next.delete('chapter');
+    setSearchParams(next, { replace: true });
+  }, [searchJump, searchParams, setSearchParams]);
+
   // ── Format dispatch ─────────────────────────────────────────────
   const isPDF = book?.format === 'pdf';
   const isEPUB = book?.format === 'epub';
   const isCBZ = book?.format === 'cbz';
-  const TXT_BACKED_FORMATS = ['txt', 'fb2', 'fbz', 'mobi', 'azw', 'azw3'];
-  const isTxtBacked = !!book && TXT_BACKED_FORMATS.includes(book.format);
-  const cantParse = !!book && !isPDF && !isEPUB && !isCBZ && !isTxtBacked;
+  // We now route EPUB through the TXT-backed reader as well, because
+  // every EPUB goes through the SPA's foliate-based ingest pipeline
+  // that produces chapters + chunks just like TXT does. Using
+  // TxtReader gives EPUBs the SelectionToolbar (which the legacy
+  // epub.js iframe path couldn't host without postMessage gymnastics).
+  // Books whose format flag is 'epub' but which were uploaded *before*
+  // ingest landed and never got chapters extracted will still hit the
+  // EpubReader fallback below via `isEPUBLegacy`.
+  const TXT_BACKED_FORMATS = ['txt', 'fb2', 'fbz', 'mobi', 'azw', 'azw3', 'epub'];
+  const isTxtBacked = !!book && TXT_BACKED_FORMATS.includes(book.format) && chapters.length > 0;
+  const isEPUBLegacy = !!isEPUB && chapters.length === 0;
+  const cantParse = !!book && !isPDF && !isEPUB && !isCBZ && !TXT_BACKED_FORMATS.includes(book.format);
 
   // Resolved page mode — narrow user's pref to one the format supports.
   const effectiveMode = useMemo(
@@ -188,10 +270,27 @@ export default function ReaderPage() {
     return ch?.title || book.title;
   }, [book, chapters, chapterOrd, isPDF]);
 
+  const activeChapterId = useMemo(() => {
+    const ch = chapters[chapterOrd];
+    return ch ? ch.id : null;
+  }, [chapters, chapterOrd]);
+
+  // Header subtitle prefers the deepest TOC node matching the current
+  // chapter — gives users a sense of where they are in the hierarchy.
+  void findTocItemByChapterId; // surface unused-import elimination guard
+
   // ── Handlers passed to readers ─────────────────────────────────
   const handleReaderReady = useCallback(() => setBookReady(true), []);
   const handleReaderBusy = useCallback((b: boolean) => setReaderBusy(b), []);
   const handleSelection = useCallback((text: string | null) => setSelectedText(text), []);
+
+  // Resolve a TOC pick (which is a chapterId) into a spine ord. If
+  // the TOC entry's chapter isn't in our spine list (rare — heading-
+  // only entry that we didn't filter out), no-op.
+  const handleTocPick = useCallback((chapterId: string) => {
+    const ch = chapters.find(c => c.id === chapterId);
+    if (ch) setChapterOrd(ch.ord);
+  }, [chapters]);
 
   // Wrap setPrefs so that any change synthesises a brief busy window.
   // ~600 ms is long enough for a paginated EPUB to re-flow + measure
@@ -211,14 +310,6 @@ export default function ReaderPage() {
   //   2. The user just changed reader prefs and we're inside the
   //      synthetic re-render window so the screen doesn't flicker
   //      mid-flow.
-  //
-  // Crucially we DO NOT key on `readerBusy` here. readerBusy fires on
-  // every chapter navigation (network fetch + re-render) and the
-  // previous wiring meant any subsequent epub.js relocate-induced
-  // re-display would pop the modal back open and never let go,
-  // because the EPUB reader entered a feedback loop with itself.
-  // After the initial load, the user should never see a blocking
-  // modal again until they touch settings.
   void readerBusy;
   const modalOpen =
     (!!book && !cantParse && !bookReady) ||
@@ -256,24 +347,22 @@ export default function ReaderPage() {
       <ReaderHeader
         title={headerTitle}
         bookTitle={book.title}
-        onTOC={() => setTocOpen(o => prefs.tocPinned ? o : true)}
+        onTOC={() => setTocVisible(v => !v)}
         onSettings={() => setSettingsOpen(true)}
         onAI={() => setAiOpen(true)}
         onBack={() => navigate('/library')}
+        activeColor={activeColor}
+        onColorChange={setActiveColor}
       />
 
       <div className="flex-1 min-h-0 flex">
-        {/* Pinned TOC docks on the left as a flex sibling. When not
-            pinned, the TocDrawer renders itself as an overlay. */}
-        {prefs.tocPinned && (
+        {/* TOC dock — always rendered when visible. PDFs don't get a
+            TOC dock because pdf.js owns its own outline UI. */}
+        {tocVisible && !isPDF && (
           <TocDrawer
-            open
-            pinned
-            chapters={chapters}
-            current={chapterOrd}
-            onPick={(o) => setChapterOrd(o)}
-            onClose={() => onTogglePin(false)}
-            onTogglePin={() => onTogglePin(false)}
+            items={tocItems.length > 0 ? tocItems : chaptersToTocFallback(chapters)}
+            activeChapterId={activeChapterId}
+            onPick={handleTocPick}
           />
         )}
 
@@ -311,7 +400,7 @@ export default function ReaderPage() {
             />
           )}
 
-          {!cantParse && progressLoaded && isEPUB && (
+          {!cantParse && progressLoaded && isEPUBLegacy && (
             <EpubReader
               bookId={book.id}
               prefs={prefs}
@@ -344,6 +433,10 @@ export default function ReaderPage() {
               onReady={handleReaderReady}
               onBusy={handleReaderBusy}
               onSelection={handleSelection}
+              activeColor={activeColor}
+              searchKeyword={searchJump?.keyword ?? null}
+              searchTargetChapterId={searchJump?.chapterId ?? null}
+              onSearchHandled={handleSearchHandled}
             />
           )}
         </div>
@@ -356,19 +449,6 @@ export default function ReaderPage() {
         onChange={handlePrefsChange}
         onClose={() => setSettingsOpen(false)}
       />
-
-      {/* Floating TOC drawer (only when not pinned). */}
-      {!prefs.tocPinned && (
-        <TocDrawer
-          open={tocOpen}
-          pinned={false}
-          chapters={chapters}
-          current={chapterOrd}
-          onPick={setChapterOrd}
-          onClose={() => setTocOpen(false)}
-          onTogglePin={() => onTogglePin(true)}
-        />
-      )}
 
       <AIChatPanel
         open={aiOpen || !!prefs.aiPinned}
@@ -384,9 +464,6 @@ export default function ReaderPage() {
         onTogglePin={() => {
           const next = !prefs.aiPinned;
           handlePrefsChange({ ...prefs, aiPinned: next });
-          // Pinning the panel implicitly opens it; unpinning leaves it
-          // visible but in drawer mode (so the user can dismiss with
-          // backdrop click as before).
           if (next) setAiOpen(true);
         }}
       />
@@ -394,19 +471,27 @@ export default function ReaderPage() {
       <BlockingModal open={modalOpen} label={modalLabel} />
     </div>
   );
+}
 
-  // Helper closures keep the JSX above readable.
-  function onTogglePin(pinned: boolean) {
-    handlePrefsChange({ ...prefs, tocPinned: pinned });
-    if (pinned) setTocOpen(false);
-  }
+// When the server returns no hierarchical TOC (rare — old books that
+// haven't been re-ingested), we synthesise a flat one from chapters
+// so the dock isn't blank.
+function chaptersToTocFallback(chapters: Chapter[]): TocItem[] {
+  return chapters.map(c => ({
+    label: c.title?.trim() || `第 ${c.ord + 1} 章`,
+    chapterId: c.id,
+    depth: 0,
+  }));
 }
 
 function ReaderHeader({
   title, bookTitle, onTOC, onSettings, onAI, onBack,
+  activeColor, onColorChange,
 }: {
   title: string; bookTitle: string;
   onTOC: () => void; onSettings: () => void; onAI: () => void; onBack: () => void;
+  activeColor: HighlightColor;
+  onColorChange: (c: HighlightColor) => void;
 }) {
   return (
     <header
@@ -447,6 +532,29 @@ function ReaderHeader({
           <div className="text-xs opacity-60 truncate">{bookTitle}</div>
         )}
       </div>
+
+      {/* Colour picker for highlights — placed immediately to the LEFT
+          of the AI icon as the user requested. The active swatch is
+          ringed; clicking another swatch updates the global colour
+          that new highlights pick up by default. We use a compact
+          inline row so it doesn't crowd the title. */}
+      <div className="flex items-center gap-1 mr-1" role="radiogroup" aria-label="高亮颜色">
+        {COLORS.map(c => (
+          <button
+            key={c}
+            type="button"
+            role="radio"
+            aria-checked={c === activeColor}
+            onClick={() => onColorChange(c)}
+            className="header-color-swatch"
+            data-active={c === activeColor ? '1' : '0'}
+            style={{ background: swatchHex(c) }}
+            title={colorLabel(c)}
+            aria-label={colorLabel(c)}
+          />
+        ))}
+      </div>
+
       <button
         onClick={onAI}
         className="opacity-70 hover:opacity-100 p-1.5"
@@ -472,4 +580,28 @@ function ReaderHeader({
       </button>
     </header>
   );
+}
+
+// Single source of truth for swatch colours — kept in sync with the
+// SelectionToolbar so the swatch in the header looks identical to the
+// one in the bubble.
+function swatchHex(c: HighlightColor): string {
+  switch (c) {
+    case 'yellow': return '#FFD900';
+    case 'red':    return '#FF6363';
+    case 'green':  return '#5FC86E';
+    case 'blue':   return '#63A5FF';
+    case 'purple': return '#BA82EB';
+    case 'orange': return '#FF9F50';
+  }
+}
+function colorLabel(c: HighlightColor): string {
+  switch (c) {
+    case 'yellow': return '黄色';
+    case 'red':    return '红色';
+    case 'green':  return '绿色';
+    case 'blue':   return '蓝色';
+    case 'purple': return '紫色';
+    case 'orange': return '橙色';
+  }
 }

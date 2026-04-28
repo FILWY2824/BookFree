@@ -115,6 +115,7 @@ func New(deps RouterDeps) http.Handler {
 	ch := &chapters.Handler{DB: deps.DB, IsProd: deps.IsProd}
 	mux.Handle("GET /api/books/{id}/chapters/list", auth.RequireUser(http.HandlerFunc(ch.HandleList)))
 	mux.Handle("GET /api/books/{id}/chapters/{chapterId}", auth.RequireUser(http.HandlerFunc(ch.HandleGet)))
+	mux.Handle("GET /api/books/{id}/toc", auth.RequireUser(http.HandlerFunc(ch.HandleTOC)))
 
 	// ── Progress ──────────────────────────────────────────────────
 	ph := &progress.Handler{DB: deps.DB, IsProd: deps.IsProd}

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"bookfree/internal/auth"
 	"bookfree/internal/response"
@@ -136,4 +138,98 @@ func ownsBook(r *http.Request, db *sql.DB, userID, bookID string) bool {
 		return false
 	}
 	return n == 1
+}
+
+// HandleTOC → GET /api/books/{id}/toc
+//
+// Returns the hierarchical table of contents that the SPA-side parser
+// extracted at ingest time. The shape mirrors what the parser emits:
+//
+//	{
+//	  "items": [
+//	    { "label": "Part I", "depth": 0, "children": [
+//	        { "label": "Chapter 1", "chapterId": "...", "depth": 1, "children": [...] }
+//	    ]},
+//	    ...
+//	  ]
+//	}
+//
+// When the book has no stored TOC (NULL `books.toc` — pre-migration
+// rows or formats whose parser couldn't extract one), we fall back to
+// synthesising a flat tree from book_chapters, so the TocDrawer always
+// has something to show. That preserves the legacy behaviour for old
+// books while letting newly-ingested ones surface their real hierarchy.
+func (h *Handler) HandleTOC(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	bookID := r.PathValue("id")
+	if bookID == "" {
+		response.Fail(w, http.StatusBadRequest, response.CodeValidation, "缺少 id")
+		return
+	}
+
+	var stored sql.NullString
+	err := h.DB.QueryRowContext(r.Context(),
+		`SELECT toc FROM books WHERE id = ? AND user_id = ? LIMIT 1`,
+		bookID, user.ID).Scan(&stored)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			response.Fail(w, http.StatusNotFound, response.CodeNotFound, "书籍不存在")
+			return
+		}
+		response.FailSafe(w, "chapters.toc.lookup", err, http.StatusInternalServerError, h.IsProd)
+		return
+	}
+
+	if stored.Valid && strings.TrimSpace(stored.String) != "" {
+		// We pass the JSON straight through. Validating it once at
+		// ingest time is enough; re-parsing on every read would just
+		// burn cycles for no benefit.
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"ok":true,"data":{"items":` + stored.String + `}}`))
+		return
+	}
+
+	// Fallback: synthesise a flat tree from chapter rows.
+	rows, err := h.DB.QueryContext(r.Context(), `
+		SELECT id, ord, title
+		FROM book_chapters
+		WHERE book_id = ? AND user_id = ?
+		ORDER BY ord ASC
+	`, bookID, user.ID)
+	if err != nil {
+		response.FailSafe(w, "chapters.toc.fallback", err, http.StatusInternalServerError, h.IsProd)
+		return
+	}
+	defer rows.Close()
+
+	type item struct {
+		Label     string  `json:"label"`
+		ChapterID *string `json:"chapterId,omitempty"`
+		Depth     int     `json:"depth"`
+	}
+	out := make([]item, 0, 32)
+	for rows.Next() {
+		var (
+			id    string
+			ord   int
+			title sql.NullString
+		)
+		if err := rows.Scan(&id, &ord, &title); err != nil {
+			response.FailSafe(w, "chapters.toc.scan", err, http.StatusInternalServerError, h.IsProd)
+			return
+		}
+		label := strings.TrimSpace(title.String)
+		if label == "" {
+			label = chapterFallbackLabel(ord)
+		}
+		idCopy := id
+		out = append(out, item{Label: label, ChapterID: &idCopy, Depth: 0})
+	}
+	response.OK(w, map[string]any{"items": out})
+}
+
+func chapterFallbackLabel(ord int) string {
+	// Keep the legacy "第 N 章" format here so the fallback list reads
+	// the same way the old TocDrawer rendered it.
+	return "第 " + strconv.Itoa(ord+1) + " 章"
 }

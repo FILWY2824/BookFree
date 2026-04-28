@@ -119,6 +119,11 @@ export default function EpubReader({
     const doc = contents?.document;
     if (!doc) return;
     if (wheelTeardownsRef.current.has(doc)) return;
+    // Skip wheel-pager installation in scroll modes — there the user
+    // expects native vertical scrolling inside the iframe (epubjs
+    // sets flow:'scrolled-doc'). Hijacking wheel for page flips would
+    // strand them at the top of every chapter with no way to read on.
+    if (pageMode !== 'paginated') return;
     const teardown = attachWheelPager(doc, {
       onPrev: () => onPrevRef.current(),
       onNext: () => onNextRef.current(),

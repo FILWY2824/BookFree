@@ -78,11 +78,29 @@ interface Props {
   onReady?: () => void;
   onBusy?: (busy: boolean) => void;
   onSelection?: (text: string | null) => void;
+  /** Default colour for new highlights — sourced from the header
+   *  swatch row in ReaderPage. The SelectionToolbar still lets users
+   *  override per-highlight, but tapping "高亮" without picking a
+   *  colour first now uses this. */
+  activeColor?: HighlightColor;
+  /** When set, the reader scans the rendered chapter for this string,
+   *  wraps every match in a temporary <mark.search-flash> span, and
+   *  scrolls the first match into view. The flash auto-clears after
+   *  3 seconds. Used by the search-result jump path. */
+  searchKeyword?: string | null;
+  /** Only flash matches when the rendered chapter equals this id.
+   *  Without this gate, every chapter the user navigates to would
+   *  flash the keyword again, which they didn't ask for. */
+  searchTargetChapterId?: string | null;
+  /** Called once after a successful search-flash so the parent can
+   *  strip the URL parameters that triggered it. */
+  onSearchHandled?: () => void;
 }
 
 export default function TxtReader({
   bookId, prefs, chapterOrd, pageMode,
   onChapterChange, onReady, onBusy, onSelection,
+  activeColor, searchKeyword, searchTargetChapterId, onSearchHandled,
 }: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([]);
   const [body, setBody] = useState<ChapterBody | null>(null);
@@ -251,6 +269,69 @@ export default function TxtReader({
       ro?.disconnect();
     };
   }, [pageMode]);
+
+  // ── Search-result flash ─────────────────────────────────────────
+  // When the user arrives via /search, ReaderPage forwards the keyword
+  // and target chapter id. Once the matching chapter has rendered we
+  // walk text nodes, wrap each occurrence in a `<mark.search-flash>`,
+  // scroll the first match into view (or flip pages to it in paginated
+  // mode), and remove the wrappers after 3 seconds.
+  //
+  // Implementation notes:
+  //   • We deliberately don't use mark.js here: it's a 30 KB dependency
+  //     and our wrap loop is ~30 lines for a single keyword. Adding a
+  //     full library is unjustified when the existing FTS5 server-side
+  //     match is already the "professional" search; this is just the
+  //     in-page indicator.
+  //   • Wrappers are tagged with data-search-flash so cleanup is a
+  //     single querySelectorAll.
+  //   • If the user navigates chapters before the timeout expires we
+  //     still clear at the next render, because the next chapter's
+  //     html overwrites the DOM tree entirely.
+  useEffect(() => {
+    if (!searchKeyword || !searchTargetChapterId) return;
+    if (!body || body.id !== searchTargetChapterId) return;
+    const root = proseRef.current;
+    if (!root) return;
+    // Run after the layout effect has applied saved highlights, so we
+    // wrap on top of the final DOM and don't get clobbered.
+    const handle = window.setTimeout(() => {
+      const wrapped = wrapKeywordMatches(root, searchKeyword);
+      if (wrapped.length === 0) {
+        onSearchHandled?.();
+        return;
+      }
+      // Scroll the first match into view. In paginated mode the
+      // chapter content lives in a CSS multicol track that doesn't
+      // accept scrollIntoView meaningfully (the column track itself
+      // doesn't scroll; we do via translateX). Compute which page
+      // contains the first match by measuring its offsetLeft against
+      // the track's viewport width.
+      const first = wrapped[0];
+      if (pageMode === 'paginated') {
+        const track = root.parentElement as HTMLElement | null;
+        if (track) {
+          const view = track.clientWidth || 1;
+          // first.offsetLeft is relative to the TRACK (its offsetParent
+          // is the column track). page index = floor(offsetLeft / view).
+          const target = Math.max(0, Math.floor(first.offsetLeft / view));
+          setPageIdx(target);
+        }
+      } else {
+        first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+      const cleanup = window.setTimeout(() => {
+        unwrapKeywordMatches(root);
+      }, 3000);
+      onSearchHandled?.();
+      // We don't return cleanup because the inner timeout's wrappers
+      // are also cleared by any subsequent render that replaces the
+      // chapter's HTML, which is the more common path.
+      void cleanup;
+    }, 60);
+    return () => window.clearTimeout(handle);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body, searchKeyword, searchTargetChapterId, pageMode]);
 
   const canPrevChapter = chapterOrd > 0;
   const canNextChapter = chapterOrd < chapters.length - 1;
@@ -443,7 +524,8 @@ export default function TxtReader({
     }
 
     // Path B: brand-new note from a fresh selection. We create both a
-    // highlight (yellow, classic) and a note linked to it.
+    // highlight (using the user's currently-selected colour from the
+    // header swatch row, default 'yellow') and a note linked to it.
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
@@ -458,7 +540,7 @@ export default function TxtReader({
         chapterId: body.id,
         locator,
         selectedText: txt,
-        color: 'yellow',
+        color: activeColor ?? 'yellow',
         style: 'highlight',
       });
       const note = await createNote(bookId, {
@@ -481,7 +563,7 @@ export default function TxtReader({
     setTbMode(null);
     setTbAnchor(null);
     onSelection?.(null);
-  }, [tbCurrent, body, bookId, notes, onSelection]);
+  }, [tbCurrent, body, bookId, notes, onSelection, activeColor]);
 
   const onDeleteNote = useCallback(async () => {
     if (!tbCurrent) return;
@@ -584,6 +666,7 @@ export default function TxtReader({
           current={tbCurrent}
           noteBody={noteForCurrent}
           hasNote={hasNoteForCurrent}
+          defaultColor={activeColor ?? 'yellow'}
           onApplyHighlight={onApplyHighlight}
           onOpenNote={onOpenNote}
           onSaveNote={onSaveNote}
@@ -664,4 +747,73 @@ function ChapterFooter({
       </button>
     </div>
   );
+}
+
+// ── search-flash helpers ──────────────────────────────────────────────
+// Wrap every text-node occurrence of `kw` (case-insensitive) inside
+// `root` in a <mark class="search-flash" data-search-flash>. Returns
+// the inserted marks in document order. We skip text inside existing
+// mark/script/style nodes so we don't double-wrap.
+
+function wrapKeywordMatches(root: HTMLElement, kw: string): HTMLElement[] {
+  const needle = kw.trim();
+  if (!needle) return [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(n: Node) {
+      const p = n.parentElement;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      if (p.closest('mark, script, style')) return NodeFilter.FILTER_REJECT;
+      if (!(n as Text).data) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const targets: Text[] = [];
+  let n: Node | null = walker.nextNode();
+  while (n) {
+    targets.push(n as Text);
+    n = walker.nextNode();
+  }
+  const lower = needle.toLowerCase();
+  const out: HTMLElement[] = [];
+  for (const node of targets) {
+    const data = node.data;
+    if (!data) continue;
+    const dl = data.toLowerCase();
+    let from = 0;
+    let matchAt = dl.indexOf(lower, from);
+    if (matchAt < 0) continue;
+    // Build a sequence of text + mark fragments to replace this node.
+    const frag = document.createDocumentFragment();
+    while (matchAt >= 0) {
+      if (matchAt > from) {
+        frag.appendChild(document.createTextNode(data.slice(from, matchAt)));
+      }
+      const m = document.createElement('mark');
+      m.className = 'search-flash';
+      m.setAttribute('data-search-flash', '1');
+      m.appendChild(document.createTextNode(data.slice(matchAt, matchAt + needle.length)));
+      frag.appendChild(m);
+      out.push(m);
+      from = matchAt + needle.length;
+      matchAt = dl.indexOf(lower, from);
+    }
+    if (from < data.length) {
+      frag.appendChild(document.createTextNode(data.slice(from)));
+    }
+    node.parentNode?.replaceChild(frag, node);
+  }
+  return out;
+}
+
+function unwrapKeywordMatches(root: HTMLElement): void {
+  const marks = root.querySelectorAll<HTMLElement>('mark[data-search-flash]');
+  marks.forEach(m => {
+    const parent = m.parentNode;
+    if (!parent) return;
+    while (m.firstChild) parent.insertBefore(m.firstChild, m);
+    parent.removeChild(m);
+  });
+  // Adjacent text nodes may now be siblings — normalise so subsequent
+  // offset arithmetic in lib/annotations isn't tripped up.
+  root.normalize();
 }

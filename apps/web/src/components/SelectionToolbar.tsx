@@ -41,6 +41,10 @@ interface Props {
   /** True if there's a saved Note row attached to this highlight. Lets
    *  us render the "delete note" button only when it's relevant. */
   hasNote?: boolean;
+  /** Default colour to seed the swatch row with when creating a fresh
+   *  highlight. Sourced from the header swatch row in ReaderPage so
+   *  the user's pre-selected colour is the one they get on tap. */
+  defaultColor?: HighlightColor;
 
   onApplyHighlight: (style: HighlightStyle, color: HighlightColor) => void;
   onOpenNote: () => void;
@@ -51,12 +55,12 @@ interface Props {
   onClose: () => void;
 }
 
-const DEFAULT_COLOR: HighlightColor = 'yellow';
+const FALLBACK_COLOR: HighlightColor = 'yellow';
 const DEFAULT_STYLE: HighlightStyle = 'highlight';
 
 export default function SelectionToolbar({
   anchor, containerRect, mode, current,
-  noteBody = '', hasNote = false,
+  noteBody = '', hasNote = false, defaultColor,
   onApplyHighlight, onOpenNote, onSaveNote, onDeleteNote,
   onCopy, onDelete, onClose,
 }: Props) {
@@ -109,7 +113,7 @@ export default function SelectionToolbar({
   if (!anchor) return null;
 
   const activeStyle = current?.style ?? DEFAULT_STYLE;
-  const activeColor = current?.color ?? DEFAULT_COLOR;
+  const activeColor = current?.color ?? defaultColor ?? FALLBACK_COLOR;
 
   if (mode === 'note') {
     return (

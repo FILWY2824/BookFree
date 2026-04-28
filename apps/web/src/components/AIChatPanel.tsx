@@ -1,24 +1,24 @@
 // AIChatPanel — right-side drawer that lets the user chat with the
-// AI about the current book. Two presentation modes:
+// AI about the current book.
 //
-//   1. drawer (pinned=false): sliding overlay with backdrop. Click
-//      outside dismisses. This is the legacy mode.
-//   2. pinned (pinned=true): floating card in the bottom-right corner,
-//      no backdrop, stays open across page interactions. The header
-//      doubles as a drag handle so the user can park it anywhere on
-//      screen. The reader stays interactive behind it.
+// Behaviour change vs the previous version:
+//   The "pinned" state used to morph the panel into a 360 × 520
+//   floating card anchored in the bottom-right of the viewport, with
+//   a drag handle. The user explicitly asked that pinning instead
+//   keep the panel in its existing drawer position (full-height,
+//   right edge of the viewport) and only differ from the unpinned
+//   state in TWO ways:
+//     1. no backdrop is drawn (so the reader stays interactive);
+//     2. clicking outside the panel doesn't dismiss it — the user
+//        has to press the ✕ button explicitly.
+//   Everything else — width, height, header layout, body, footer —
+//   stays exactly the same as the unpinned drawer. The pin button
+//   in the header still toggles between the two states.
 //
 // Lifetime / persistence:
-//   • The chat history lives in component state for the duration of
-//     the reader session. We don't persist (no /api/ai/conversations
-//     yet on the Go server). When the user navigates away, the
-//     transcript is gone — we surface a tiny "清空" button so this
-//     is at least intentional.
-//   • The "include current chapter / current selection as context"
-//     toggles are per-message — they live in the input bar and are
-//     consulted when the user hits send.
-//   • Pin position is local UI state. Pin on/off is owned by the
-//     parent (it's persisted in prefs alongside tocPinned).
+//   Chat history lives in component state for the duration of the
+//   reader session. Persistence is on the backlog. We surface a tiny
+//   "清空" button so a stale session ending is at least intentional.
 //
 // We intentionally don't render markdown for now. The model's reply
 // is shown in a <pre>-style bubble (whitespace-preserving) so any
@@ -37,9 +37,8 @@ interface Props {
   /** Latest text excerpt the user selected — passed to the model as
    *  optional focus context when they tick "include selection". */
   selectedText?: string | null;
-  /** When true, render as a free-floating draggable card instead of a
-   *  modal drawer. Click-outside doesn't dismiss in this mode — the
-   *  user has to press the close button explicitly, or unpin. */
+  /** When true, suppress the backdrop and the click-outside-close
+   *  handler so the panel stays open while the user keeps reading. */
   pinned?: boolean;
   onTogglePin?: () => void;
 }
@@ -62,13 +61,6 @@ export default function AIChatPanel({
   const [includeSelection, setIncludeSelection] = useState(true);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Pinned-mode position. Default: bottom-right with a small inset.
-  // Stored as right/bottom offsets so the card stays anchored if the
-  // viewport changes mid-session.
-  const [pinPos, setPinPos] = useState<{ right: number; bottom: number }>(
-    () => ({ right: 20, bottom: 20 }),
-  );
 
   // Probe AI availability on first open.
   useEffect(() => {
@@ -124,122 +116,81 @@ export default function AIChatPanel({
     setMessages(m => [...m, { id: rid(), role: 'assistant', content: r.message.content }]);
   };
 
-  // Drag handler — only active in pinned mode. Mousedown on the header
-  // captures the offset from the card's current right/bottom anchor and
-  // updates on every mousemove until mouseup.
-  const onHeaderMouseDown = (e: React.MouseEvent<HTMLElement>) => {
-    if (!pinned) return;
-    // Don't start dragging when the user clicked an interactive control
-    // inside the header.
-    if ((e.target as HTMLElement).closest('button')) return;
-    e.preventDefault();
-    const startRight = pinPos.right;
-    const startBottom = pinPos.bottom;
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const onMove = (ev: MouseEvent) => {
-      const dx = ev.clientX - startX;
-      const dy = ev.clientY - startY;
-      // Right anchor decreases when cursor moves right; bottom anchor
-      // decreases when cursor moves down.
-      const nextRight = Math.max(8, Math.min(window.innerWidth - 200, startRight - dx));
-      const nextBottom = Math.max(8, Math.min(window.innerHeight - 80, startBottom - dy));
-      setPinPos({ right: nextRight, bottom: nextBottom });
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  };
+  // The aside element is identical whether pinned or not — we just
+  // skip the backdrop and the click-outside handler when pinned.
+  const aside = (
+    <aside
+      onMouseDown={pinned ? undefined : (e => e.stopPropagation())}
+      className={
+        'absolute right-0 top-0 h-full w-[360px] max-w-[92vw] border-l shadow-elev '
+        + 'flex flex-col '
+        + (pinned ? '' : 'animate-drawer-in-right')
+      }
+      style={{
+        background: 'var(--reader-bg)',
+        color: 'var(--reader-fg)',
+        borderColor: 'var(--reader-border)',
+      }}
+    >
+      <Header
+        bookTitle={bookTitle}
+        chapterTitle={chapterTitle}
+        messageCount={messages.length}
+        onClear={() => setMessages([])}
+        onClose={onClose}
+        pinned={pinned}
+        onTogglePin={onTogglePin}
+      />
+      <Body
+        scrollRef={scrollRef}
+        messages={messages}
+        busy={busy}
+        configured={configured}
+      />
+      <Footer
+        draft={draft}
+        setDraft={setDraft}
+        busy={busy}
+        send={send}
+        selectedText={selectedText}
+        includeSelection={includeSelection}
+        setIncludeSelection={setIncludeSelection}
+      />
+    </aside>
+  );
 
-  // ── Pinned mode: floating, draggable, no backdrop ──────────────────
   if (pinned) {
+    // Pinned: no backdrop, no click-outside-close, but the panel is
+    // still positioned at the right edge of the viewport using a
+    // pointer-events-none container so the rest of the reader stays
+    // clickable behind it. The aside itself enables pointer events.
     return (
-      <aside
-        className="fixed z-40 w-[360px] max-w-[92vw] h-[520px] max-h-[80vh] border shadow-elev rounded-xl flex flex-col"
-        style={{
-          right: pinPos.right + 'px',
-          bottom: pinPos.bottom + 'px',
-          background: 'var(--reader-bg)',
-          color: 'var(--reader-fg)',
-          borderColor: 'var(--reader-border)',
-        }}
+      <div
+        className="fixed inset-0 z-40 pointer-events-none"
       >
-        <Header
-          bookTitle={bookTitle}
-          chapterTitle={chapterTitle}
-          messageCount={messages.length}
-          onClear={() => setMessages([])}
-          onClose={onClose}
-          pinned
-          onTogglePin={onTogglePin}
-          onMouseDown={onHeaderMouseDown}
-        />
-        <Body
-          scrollRef={scrollRef}
-          messages={messages}
-          busy={busy}
-          configured={configured}
-        />
-        <Footer
-          draft={draft}
-          setDraft={setDraft}
-          busy={busy}
-          send={send}
-          selectedText={selectedText}
-          includeSelection={includeSelection}
-          setIncludeSelection={setIncludeSelection}
-        />
-      </aside>
+        <div className="pointer-events-auto h-full">
+          {aside}
+        </div>
+      </div>
     );
   }
 
-  // ── Drawer mode: overlay with backdrop ─────────────────────────────
+  // Unpinned: backdrop + click-outside-close, exactly the legacy
+  // behaviour for the drawer mode.
   return (
     <div
       className="fixed inset-0 z-40"
       onMouseDown={onClose}
     >
       <div className="absolute inset-0 bg-ink-900/30 animate-fade-in" />
-      <aside
-        onMouseDown={e => e.stopPropagation()}
-        className="absolute right-0 top-0 h-full w-[360px] max-w-[92vw] bg-paper-50 border-l border-paper-300/70 shadow-elev animate-drawer-in-right flex flex-col"
-        style={{ background: 'var(--reader-bg)', color: 'var(--reader-fg)' }}
-      >
-        <Header
-          bookTitle={bookTitle}
-          chapterTitle={chapterTitle}
-          messageCount={messages.length}
-          onClear={() => setMessages([])}
-          onClose={onClose}
-          pinned={false}
-          onTogglePin={onTogglePin}
-        />
-        <Body
-          scrollRef={scrollRef}
-          messages={messages}
-          busy={busy}
-          configured={configured}
-        />
-        <Footer
-          draft={draft}
-          setDraft={setDraft}
-          busy={busy}
-          send={send}
-          selectedText={selectedText}
-          includeSelection={includeSelection}
-          setIncludeSelection={setIncludeSelection}
-        />
-      </aside>
+      {aside}
     </div>
   );
 }
 
 function Header({
   bookTitle, chapterTitle, messageCount, onClear, onClose,
-  pinned, onTogglePin, onMouseDown,
+  pinned, onTogglePin,
 }: {
   bookTitle: string;
   chapterTitle?: string;
@@ -248,14 +199,11 @@ function Header({
   onClose: () => void;
   pinned: boolean;
   onTogglePin?: () => void;
-  onMouseDown?: (e: React.MouseEvent<HTMLElement>) => void;
 }) {
   return (
     <header
-      className={'px-5 py-3 border-b flex items-center justify-between '
-        + (pinned ? 'cursor-move select-none' : '')}
+      className="px-5 py-3 border-b flex items-center justify-between"
       style={{ borderColor: 'var(--reader-border)' }}
-      onMouseDown={onMouseDown}
     >
       <div className="min-w-0">
         <h3 className="font-serif text-base">AI 阅读助手</h3>
@@ -276,8 +224,8 @@ function Header({
           <button
             onClick={onTogglePin}
             className="opacity-60 hover:opacity-100 p-1"
-            aria-label={pinned ? '取消固定' : '固定为悬浮窗'}
-            title={pinned ? '取消固定' : '固定为悬浮窗'}
+            aria-label={pinned ? '取消固定' : '固定面板'}
+            title={pinned ? '取消固定（恢复点击外部关闭）' : '固定面板（不再点击外部关闭）'}
           >
             <svg width="14" height="14" viewBox="0 0 24 24"
                  fill={pinned ? 'currentColor' : 'none'}
