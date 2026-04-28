@@ -1,26 +1,37 @@
-# BookFree — one-click deploy.
+# BookFree — Docker Compose 部署。
 #
-# Usage:
+# 部署前一次性准备(总共两步):
 #
-#     # First-time setup: generate a secret and start everything.
-#     ./docker-quickstart.sh
+#   1) 生成密钥并写入 .env。.env 与本文件位于同一目录;Compose 会自动读取
+#      它,无需 --env-file 参数。
 #
-#     # Or by hand:
-#     export BOOKFREE_APP_SECRET=$(openssl rand -hex 32)
-#     docker compose up -d
+#      Linux / macOS:
+#          echo "BOOKFREE_APP_SECRET=$(openssl rand -hex 32)" > .env
 #
-# Logs:    docker compose logs -f
-# Stop:    docker compose down
-# Update:  docker compose pull && docker compose up -d --build
+#      Windows PowerShell:
+#          $b = New-Object byte[] 32
+#          [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+#          "BOOKFREE_APP_SECRET=" + (-join ($b | %{ '{0:x2}' -f $_ })) | Out-File -Encoding ascii .env
 #
-# Persistence: ./data/ on the host is bind-mounted into /app/data inside
-# the container. SQLite database, book files, and uploads all live there.
-# Back this up.
+#   2) 翻一下 .env.example,把想覆盖的字段(注册开关、AI Key、时区等)
+#      也填进 .env。本文件下方 environment: 块对每个字段都给了默认值,.env
+#      不写就用默认。
+#
+# 部署:
+#     docker compose up -d --build
+#
+# 运维:
+#     docker compose logs -f
+#     docker compose ps
+#     docker compose restart
+#     docker compose down
+#     docker compose up -d --build      # 改了代码或本文件后
+#
+# 数据持久化:宿主机 ./data/ 绑定到容器 /app/data。SQLite 数据库与上传的
+# 书籍文件都在那里,备份时打包它就够了。
 
 services:
   bookfree:
-    # `build: .` lets `docker compose up` build the image from this repo.
-    # If you'd rather pull a pre-built image, replace with `image: ...`.
     build:
       context: .
       dockerfile: Dockerfile
@@ -28,35 +39,41 @@ services:
     container_name: bookfree
     restart: unless-stopped
 
-    # Bind-mount host ./data into the container. Using a bind mount (as
-    # opposed to a named volume) makes backups trivially `tar czf` of the
-    # host directory.
     volumes:
       - ./data:/app/data
 
-    # Localhost-only by default. Front this with Caddy / Nginx / Traefik
-    # for TLS and external access. To expose directly, change to "8788:8788".
+    # 默认仅在宿主机本地暴露,前面套 Caddy / Nginx / Traefik 做 TLS。
+    # 想容器直接对外,把 "127.0.0.1:8788:8788" 改成 "8788:8788"。
     ports:
       - "127.0.0.1:8788:8788"
 
     environment:
-      # REQUIRED. The compose-runner shell must export this — see
-      # docker-quickstart.sh for the standard recipe. We do NOT put a
-      # default here; missing secret should fail loudly, not quietly use
-      # a known string.
-      BOOKFREE_APP_SECRET: "${BOOKFREE_APP_SECRET:?BOOKFREE_APP_SECRET must be set — run docker-quickstart.sh or export it}"
+      # 必填。在 .env 中设置;缺失或为空时 compose 会立即拒绝启动并打印
+      # 这条信息,不会神秘地起一个无密钥的进程。
+      BOOKFREE_APP_SECRET: ${BOOKFREE_APP_SECRET:?请先在 .env 中填入 BOOKFREE_APP_SECRET — Linux 用 `openssl rand -hex 32` 生成 32 字节 hex 密钥}
 
-      # Tunables — uncomment / change as needed.
-      # BOOKFREE_LOG_LEVEL: info
-      # BOOKFREE_MAX_UPLOAD_SIZE_MB: 200
-      # BOOKFREE_ALLOW_REGISTRATION: "1"   # default off in production
-      # GOMEMLIMIT: 48MiB
-      # TZ: Asia/Shanghai
+      # 下面字段都允许 .env 覆盖;.env 没设就用 :- 后的默认值。
+      BOOKFREE_ENV:                 ${BOOKFREE_ENV:-production}
+      BOOKFREE_ADDR:                ${BOOKFREE_ADDR:-0.0.0.0:8788}
+      BOOKFREE_LOG_LEVEL:           ${BOOKFREE_LOG_LEVEL:-info}
+      BOOKFREE_MAX_UPLOAD_SIZE_MB:  ${BOOKFREE_MAX_UPLOAD_SIZE_MB:-200}
+      BOOKFREE_ALLOW_REGISTRATION:  ${BOOKFREE_ALLOW_REGISTRATION:-0}
+      BOOKFREE_TRUSTED_PROXIES:     ${BOOKFREE_TRUSTED_PROXIES:-}
 
-    # Memory limits as a hard backstop. Our actual usage is ~32 MB at idle
-    # and stays flat under load, but pinning at the container level guards
-    # against future regressions and gives the OOM killer a clean target.
-    # The reservation gets honored by the scheduler; the limit is the cap.
+      # 阅读器 AI 面板调用此 key。留空则前端显示"AI 未配置",
+      # /api/ai/chat 返回 501 NOT_CONFIGURED。
+      ANTHROPIC_API_KEY:            ${ANTHROPIC_API_KEY:-}
+
+      # Go 软内存上限,超过即更激进 GC。配合下面 deploy.resources.limits
+      # 的硬上限留 16MB 缓冲。
+      GOMEMLIMIT:                   ${GOMEMLIMIT:-240MiB}
+
+      # 日志时间戳与 X-Date 响应头按这个走。
+      TZ:                           ${TZ:-Asia/Shanghai}
+
+    # 容器层硬上限 256MB。空闲约 32MB,加载几本大 PDF 同时开 AI 流时
+    # 峰值 ~120MB,256 留充足缓冲。reservation 是调度器给的"保底",limit
+    # 是 OOM killer 触发线。
     deploy:
       resources:
         limits:
@@ -64,18 +81,16 @@ services:
         reservations:
           memory: 64M
 
-    # Container-level healthcheck mirrors the one in the Dockerfile.
-    # Operators using a load balancer can poll /api/health directly; this
-    # is for `docker ps` to show health status without external tooling.
+    # 容器级健康检查,与 Dockerfile 里的 HEALTHCHECK 重复一份;这里写在
+    # compose 是为了让 `docker compose ps` 也显示 (healthy)。
     healthcheck:
       test: ["CMD", "wget", "-qO-", "--tries=1", "--timeout=4", "http://127.0.0.1:8788/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
-    # Light log size cap — without this, an over-talkative AI worker could
-    # fill the disk with json-file driver output. 10 MB × 3 = 30 MB max.
+    # 单文件 10MB × 3 = 最多 30MB,防止失控的 worker 灌满磁盘。
     logging:
       driver: json-file
       options:
