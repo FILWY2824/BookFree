@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	ErrNotFound  = errors.New("storage: not found")
+	ErrNotFound   = errors.New("storage: not found")
 	ErrInvalidKey = errors.New("storage: invalid key")
 )
 
@@ -44,6 +44,18 @@ type Storage interface {
 	Stat(ctx context.Context, key string) (ObjectInfo, error)
 	Delete(ctx context.Context, key string) error
 	Exists(ctx context.Context, key string) (bool, error)
+	// DeletePrefix removes everything stored under `prefix` (treated
+	// as a directory: trailing "/" is added if missing). Used when a
+	// book or a whole user is deleted and we need to leave nothing
+	// behind on disk — neither the files nor the empty parent
+	// directories. Implementations MUST refuse an empty prefix to
+	// avoid a "delete everything" footgun, and MUST validate the
+	// prefix the same way they validate keys (no traversal escapes).
+	//
+	// On the local driver this walks the subtree and removes both
+	// files and empty directories bottom-up. Missing prefixes are not
+	// an error — they're treated the same as "already deleted".
+	DeletePrefix(ctx context.Context, prefix string) error
 }
 
 // BookKey returns the canonical storage key for a book asset. The
@@ -52,4 +64,18 @@ type Storage interface {
 // matters: a wrong prefix and the INSERT into book_assets aborts.
 func BookKey(userID, bookID, name string) string {
 	return "users/" + userID + "/books/" + bookID + "/" + name
+}
+
+// BookPrefix is the directory all of one book's assets live under.
+// Used by the book-delete handler to recursively clean up so we
+// don't leave empty `books/<bookID>/` shells behind. Pair with
+// DeletePrefix on the Storage driver.
+func BookPrefix(userID, bookID string) string {
+	return "users/" + userID + "/books/" + bookID + "/"
+}
+
+// UserPrefix is everything one user owns under storage. Used by the
+// user-delete path so a deleted account leaves no residue on disk.
+func UserPrefix(userID string) string {
+	return "users/" + userID + "/"
 }

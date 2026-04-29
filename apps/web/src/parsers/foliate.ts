@@ -66,6 +66,17 @@ interface ZipLoader {
   getComment: () => Promise<string>;
 }
 
+// Loader is the lowest-common-denominator dependency the sanitize
+// step needs from us. Right now both branches (zip-backed EPUB and
+// plain MOBI) provide an object with loadBlob; for plain MOBI the
+// loader will be null and we just skip image inlining (MOBI bundles
+// images by recindex; foliate's mobi.js already rewrites those
+// internally before the HTML reaches us, so there's nothing left to
+// resolve in the markup).
+type Loader = Pick<ZipLoader, 'loadBlob'>;
+
+const NO_LOADER: Loader = { loadBlob: async () => null };
+
 async function makeZipLoader(file: File): Promise<{ loader: ZipLoader; reader: ZipReader<Blob> }> {
   // useWebWorkers=false keeps the Vite dev server happy (no extra
   // worker chunk needed) and avoids a CSP wrinkle for production.
@@ -138,7 +149,7 @@ async function parseEpubInternal(file: File): Promise<IngestPayload> {
   try {
     const epub = new EPUB(loader);
     const book = await epub.init() as FoliateBook;
-    return await collectBook(book, file.name, /*isComic=*/false);
+    return await collectBook(book, file.name, /*isComic=*/false, loader);
   } finally {
     await reader.close();
   }
@@ -154,28 +165,31 @@ async function parseMobiInternal(file: File): Promise<IngestPayload> {
   // `open` returns either a MOBI6 or KF8 wrapper, both of which expose
   // the same .sections / .toc / .metadata interface.
   const book = await mobi.open(file) as FoliateBook;
-  return await collectBook(book, file.name, /*isComic=*/false);
+  // MOBI bundles images by recindex; foliate's mobi.js already
+  // rewrites those to data URLs internally before we see the HTML,
+  // so we don't need to resolve anything against the file at this
+  // step. Pass NO_LOADER and the sanitize step short-circuits image
+  // inlining for those (the data: src branch keeps them as-is).
+  return await collectBook(book, file.name, /*isComic=*/false, NO_LOADER);
 }
 
 // ── FB2 / FBZ ────────────────────────────────────────────────────────
 
 async function parseFb2Internal(file: File): Promise<IngestPayload> {
   const book = await makeFB2(file) as FoliateBook;
-  return await collectBook(book, file.name, /*isComic=*/false);
+  return await collectBook(book, file.name, /*isComic=*/false, NO_LOADER);
 }
 
 async function parseFbzInternal(file: File): Promise<IngestPayload> {
   const { loader, reader } = await makeZipLoader(file);
   try {
-    // Find the inner .fb2 entry. Fall back to the first non-directory
-    // entry if there's no .fb2 (some producers omit the extension).
     const fb2Entry = loader.entries.find(e => e.filename.toLowerCase().endsWith('.fb2'))
                   ?? loader.entries[0];
     if (!fb2Entry) throw new Error('FBZ 内未找到任何文件');
     const blob = await loader.loadBlob(fb2Entry.filename);
     if (!blob) throw new Error('FBZ 内 .fb2 文件读取失败');
     const book = await makeFB2(blob) as FoliateBook;
-    return await collectBook(book, file.name, /*isComic=*/false);
+    return await collectBook(book, file.name, /*isComic=*/false, NO_LOADER);
   } finally {
     await reader.close();
   }
@@ -228,7 +242,7 @@ interface FoliateBook {
   resolveHref?: (href: string) => { index: number; anchor?: unknown } | null;
 }
 
-async function collectBook(book: FoliateBook, filename: string, isComic: boolean): Promise<IngestPayload> {
+async function collectBook(book: FoliateBook, filename: string, isComic: boolean, loader: Loader): Promise<IngestPayload> {
   const meta = extractMetadata(book, filename);
   const tocByIndex = buildTocIndex(book);
 
@@ -249,13 +263,12 @@ async function collectBook(book: FoliateBook, filename: string, isComic: boolean
     try {
       doc = await sec.createDocument();
     } catch (e) {
-      // A single broken section shouldn't kill the whole book — log
-      // and move on. The rest of the book stays readable.
       console.warn(`section ${i} createDocument failed:`, e);
       continue;
     }
 
-    const html = sanitizeBodyHtml(doc);
+    const sectionHref = typeof sec.href === 'string' ? sec.href : '';
+    const html = await sanitizeBodyHtml(doc, loader, sectionHref);
     const text = htmlToText(html);
     if (!isComic && text.trim().length === 0) continue;
 
@@ -477,23 +490,145 @@ function buildHierarchicalToc(
 
 // Turn the foliate-loaded Document into a self-contained HTML string
 // for storage. We keep the body's children verbatim — that preserves
-// structure (lists, blockquotes, images-as-recindex placeholders) but
-// strip <script>/<style>/event handlers since the reader's iframe
-// has CSP enabled and those would just be dead weight.
-function sanitizeBodyHtml(doc: Document): string {
+// sanitizeBodyHtml strips dangerous bits (scripts, inline event
+// handlers) AND inlines images. EPUB chapter HTML carries
+// `<img src="../images/foo.jpg">` paths relative to the chapter
+// document inside the zip; once the zip is gone those URLs resolve
+// to nothing and the reader shows broken-image placeholders. We
+// resolve each src against the zip via `loader.loadBlob`, then
+// embed:
+//   • images ≤ 256 KB         → as a data URL inline (no extra
+//                                 disk cost; image lives in the
+//                                 chapter HTML)
+//   • images > 256 KB         → dropped silently with a console
+//                                 warning. Inlining huge images
+//                                 would explode the chapter row in
+//                                 SQLite; we accept the trade-off
+//                                 of "this big illustration won't
+//                                 render" until we add a separate
+//                                 book-asset table.
+//
+// Why not store images in a side table:
+//   The user explicitly asked for the "smallest disk footprint"
+//   route on RAG; matching that ethic here, inlining as data URLs
+//   means we don't add a new table or new code path on the reader
+//   side — and most EPUB images are well under 256 KB anyway.
+//
+// `basePath` is the chapter HTML's path inside the zip, used to
+// resolve relative srcs like "../images/x.jpg".
+const INLINE_IMAGE_MAX = 256 * 1024;
+
+async function sanitizeBodyHtml(
+  doc: Document,
+  loader: Loader,
+  basePath: string,
+): Promise<string> {
   const body = doc.body ?? doc.documentElement;
   if (!body) return '';
-  // Remove script/style/link/meta in place — operating on a clone so
-  // we don't mutate the parser's cache (foliate caches Documents).
   const clone = body.cloneNode(true) as HTMLElement;
   clone.querySelectorAll('script, style, link, meta').forEach(n => n.remove());
-  // Strip on* handlers from every element.
+
+  // Strip on* handlers + javascript:/data: in href on every element.
   for (const el of Array.from(clone.querySelectorAll('*'))) {
     for (const a of Array.from(el.attributes)) {
       if (a.name.toLowerCase().startsWith('on')) el.removeAttribute(a.name);
     }
   }
+
+  // Inline images.
+  const imgs = Array.from(clone.querySelectorAll('img'));
+  for (const img of imgs) {
+    const rawSrc = img.getAttribute('src') || img.getAttribute('xlink:href') || '';
+    if (!rawSrc) {
+      img.remove();
+      continue;
+    }
+    if (rawSrc.startsWith('data:')) continue; // already inline
+    if (/^https?:/.test(rawSrc)) {
+      // Don't fetch external URLs at ingest — privacy + offline
+      // concerns. Convert to a placeholder.
+      img.removeAttribute('src');
+      img.setAttribute('alt', img.getAttribute('alt') || '');
+      continue;
+    }
+    const resolved = resolveZipPath(basePath, rawSrc);
+    if (!resolved) {
+      img.remove();
+      continue;
+    }
+    try {
+      const blob = await loader.loadBlob(resolved);
+      if (!blob) {
+        img.remove();
+        continue;
+      }
+      if (blob.size > INLINE_IMAGE_MAX) {
+        console.warn(`image ${resolved} is ${blob.size} B, larger than inline cap; dropped`);
+        img.remove();
+        continue;
+      }
+      const dataUrl = await blobToDataUrl(blob);
+      img.setAttribute('src', dataUrl);
+      img.removeAttribute('xlink:href');
+      // Keep height auto so the page-flip math doesn't get confused
+      // by absurdly tall images.
+      const style = img.getAttribute('style') || '';
+      img.setAttribute('style', style + ';max-width:100%;height:auto');
+    } catch (e) {
+      console.warn(`failed to inline image ${resolved}:`, e);
+      img.remove();
+    }
+  }
+
+  // Same for SVG <image href>.
+  const svgImages = Array.from(clone.querySelectorAll('image'));
+  for (const im of svgImages) {
+    const href = im.getAttribute('href') || im.getAttribute('xlink:href') || '';
+    if (!href || href.startsWith('data:') || /^https?:/.test(href)) continue;
+    const resolved = resolveZipPath(basePath, href);
+    if (!resolved) { im.remove(); continue; }
+    try {
+      const blob = await loader.loadBlob(resolved);
+      if (!blob || blob.size > INLINE_IMAGE_MAX) { im.remove(); continue; }
+      const dataUrl = await blobToDataUrl(blob);
+      im.setAttribute('href', dataUrl);
+      im.removeAttribute('xlink:href');
+    } catch {
+      im.remove();
+    }
+  }
+
   return clone.innerHTML;
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Resolve a relative src against the chapter's base path inside the
+// zip. Trims any "./" / "../" segments and the leading slash so the
+// resulting key matches a zip entry filename.
+function resolveZipPath(base: string, rel: string): string | null {
+  if (!rel) return null;
+  // Absolute zip path.
+  if (rel.startsWith('/')) return rel.slice(1).split('#')[0].split('?')[0];
+  const baseDir = base.includes('/') ? base.slice(0, base.lastIndexOf('/') + 1) : '';
+  let resolved = baseDir + rel;
+  resolved = resolved.split('#')[0].split('?')[0];
+  // Resolve "../" walks.
+  const parts = resolved.split('/');
+  const out: string[] = [];
+  for (const p of parts) {
+    if (p === '' || p === '.') continue;
+    if (p === '..') { out.pop(); continue; }
+    out.push(p);
+  }
+  return out.join('/') || null;
 }
 
 function pickChapterTitle(doc: Document, tocLabel: string | undefined): string {

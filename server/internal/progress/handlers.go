@@ -18,11 +18,12 @@ type Handler struct {
 }
 
 type progressDTO struct {
-	Locator      *string  `json:"locator,omitempty"`
-	ChapterOrder *int     `json:"chapterOrder,omitempty"`
-	PageNo       *int     `json:"pageNo,omitempty"`
-	Percent      float64  `json:"percent"`
-	LastReadAt   int64    `json:"lastReadAt"`
+	Locator      *string `json:"locator,omitempty"`
+	ChapterID    *string `json:"chapterId,omitempty"`
+	ChapterOrder *int    `json:"chapterOrder,omitempty"`
+	PageNo       *int    `json:"pageNo,omitempty"`
+	Percent      float64 `json:"percent"`
+	LastReadAt   int64   `json:"lastReadAt"`
 }
 
 // HandleGet → GET /api/books/{id}/progress
@@ -40,19 +41,20 @@ func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row := h.DB.QueryRowContext(r.Context(), `
-		SELECT locator, chapter_order, page_no, percent, last_read_at
+		SELECT locator, chapter_id, chapter_order, page_no, percent, last_read_at
 		FROM reading_progress
 		WHERE user_id = ? AND book_id = ?
 		LIMIT 1
 	`, user.ID, bookID)
 
 	var (
-		locator                sql.NullString
-		chapterOrder, pageNo   sql.NullInt64
-		percent                float64
-		lastReadAt             int64
+		locator              sql.NullString
+		chapterID            sql.NullString
+		chapterOrder, pageNo sql.NullInt64
+		percent              float64
+		lastReadAt           int64
 	)
-	if err := row.Scan(&locator, &chapterOrder, &pageNo, &percent, &lastReadAt); err != nil {
+	if err := row.Scan(&locator, &chapterID, &chapterOrder, &pageNo, &percent, &lastReadAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			response.OK(w, map[string]any{"progress": progressDTO{Percent: 0}})
 			return
@@ -63,6 +65,9 @@ func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	dto := progressDTO{Percent: percent, LastReadAt: lastReadAt}
 	if locator.Valid {
 		dto.Locator = &locator.String
+	}
+	if chapterID.Valid {
+		dto.ChapterID = &chapterID.String
 	}
 	if chapterOrder.Valid {
 		v := int(chapterOrder.Int64)
@@ -90,6 +95,7 @@ func (h *Handler) HandlePut(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		Locator      *string  `json:"locator"`
+		ChapterID    *string  `json:"chapterId"`
 		ChapterOrder *int     `json:"chapterOrder"`
 		PageNo       *int     `json:"pageNo"`
 		Percent      *float64 `json:"percent"`
@@ -126,10 +132,11 @@ func (h *Handler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err := h.DB.ExecContext(r.Context(), `
-		INSERT INTO reading_progress (user_id, book_id, locator, chapter_order, page_no, percent, last_read_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO reading_progress (user_id, book_id, locator, chapter_id, chapter_order, page_no, percent, last_read_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (user_id, book_id) DO UPDATE SET
 			locator       = excluded.locator,
+			chapter_id    = excluded.chapter_id,
 			chapter_order = excluded.chapter_order,
 			page_no       = excluded.page_no,
 			percent       = excluded.percent,
@@ -138,6 +145,7 @@ func (h *Handler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	`,
 		user.ID, bookID,
 		toNullStr(body.Locator),
+		toNullStr(body.ChapterID),
 		toNullInt(body.ChapterOrder),
 		toNullInt(body.PageNo),
 		pct,

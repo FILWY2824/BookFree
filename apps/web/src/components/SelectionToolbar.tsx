@@ -14,6 +14,16 @@
 //   • 'note'   — the note editor is open. The toolbar collapses
 //                into a compact textarea + save/cancel/delete.
 //
+// Per-style colour memory:
+//   The active swatch row is seeded from prefs.styleColors[currentStyle]
+//   on each style switch. The user's "current" picks at the toolbar
+//   level are local to the popover; clicking apply commits style+colour
+//   to the highlight AND bubbles up so the parent updates the
+//   per-style memory in prefs (so next time they pick the same style,
+//   their preferred colour is the default again). Existing annotations
+//   on the page are NOT recoloured — that requires explicitly clicking
+//   the annotation and picking a new colour.
+//
 // We deliberately keep this component "presentational": it doesn't
 // know about the API, just emits onApplyHighlight / onAttachNote /
 // onDelete callbacks. The reader wires those to the highlights API.
@@ -23,6 +33,7 @@ import {
   COLORS, STYLES,
   type Highlight, type HighlightColor, type HighlightStyle,
 } from '../lib/highlights';
+import type { ReaderPrefs } from '../lib/prefs';
 
 export type SelectionToolbarMode = 'create' | 'edit' | 'note';
 
@@ -38,13 +49,11 @@ interface Props {
   current?: Highlight | null;
   /** Existing note body if any (used only in 'note' mode). */
   noteBody?: string;
-  /** True if there's a saved Note row attached to this highlight. Lets
-   *  us render the "delete note" button only when it's relevant. */
+  /** True if there's a saved Note row attached to this highlight. */
   hasNote?: boolean;
-  /** Default colour to seed the swatch row with when creating a fresh
-   *  highlight. Sourced from the header swatch row in ReaderPage so
-   *  the user's pre-selected colour is the one they get on tap. */
-  defaultColor?: HighlightColor;
+  /** Per-style remembered colour from prefs.styleColors. The currently-
+   *  picked style's colour is what the apply button uses by default. */
+  styleColors: ReaderPrefs['styleColors'];
 
   onApplyHighlight: (style: HighlightStyle, color: HighlightColor) => void;
   onOpenNote: () => void;
@@ -55,21 +64,39 @@ interface Props {
   onClose: () => void;
 }
 
-const FALLBACK_COLOR: HighlightColor = 'yellow';
 const DEFAULT_STYLE: HighlightStyle = 'highlight';
 
 export default function SelectionToolbar({
   anchor, containerRect, mode, current,
-  noteBody = '', hasNote = false, defaultColor,
+  noteBody = '', hasNote = false, styleColors,
   onApplyHighlight, onOpenNote, onSaveNote, onDeleteNote,
   onCopy, onDelete, onClose,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const [draftNote, setDraftNote] = useState(noteBody);
+  // Local "currently selected" style + colour inside the popover.
+  // Initialised from `current` (when editing) or from styleColors
+  // (when creating). Switching style RE-PICKS the per-style colour
+  // memory so the user sees a different swatch highlighted.
+  const [pickedStyle, setPickedStyle] = useState<HighlightStyle>(
+    current?.style ?? DEFAULT_STYLE,
+  );
+  const [pickedColor, setPickedColor] = useState<HighlightColor>(
+    current?.color ?? styleColors[current?.style ?? DEFAULT_STYLE],
+  );
 
-  // Keep the draft in sync when noteBody flips (e.g. user clicks a
-  // different highlight that already has a note).
+  // When the user switches style, refresh the colour to that style's
+  // memory unless they're editing an existing highlight (in which
+  // case keep their explicit colour pick).
+  const onPickStyle = (s: HighlightStyle) => {
+    setPickedStyle(s);
+    if (!current) {
+      setPickedColor(styleColors[s]);
+    }
+  };
+
+  // Keep the draft in sync when noteBody flips.
   useEffect(() => { setDraftNote(noteBody); }, [noteBody, mode]);
 
   // Recompute position when anchor or container changes. We measure
@@ -112,8 +139,8 @@ export default function SelectionToolbar({
 
   if (!anchor) return null;
 
-  const activeStyle = current?.style ?? DEFAULT_STYLE;
-  const activeColor = current?.color ?? defaultColor ?? FALLBACK_COLOR;
+  const activeStyle = pickedStyle;
+  const activeColor = pickedColor;
 
   if (mode === 'note') {
     return (
@@ -173,7 +200,7 @@ export default function SelectionToolbar({
             key={s}
             type="button"
             className={'style-pill ' + (s === activeStyle ? 'active' : '')}
-            onClick={() => onApplyHighlight(s, activeColor)}
+            onClick={() => onPickStyle(s)}
             title={styleLabel(s)}
           >
             {styleLabel(s)}
@@ -188,13 +215,20 @@ export default function SelectionToolbar({
             type="button"
             className={'color-swatch ' + (c === activeColor ? 'active' : '')}
             style={{ background: swatchBg(c) }}
-            onClick={() => onApplyHighlight(activeStyle, c)}
+            onClick={() => setPickedColor(c)}
             aria-label={c}
             title={colorLabel(c)}
           />
         ))}
       </div>
       <div className="actions">
+        <button
+          type="button"
+          className="action-btn primary-action"
+          onClick={() => onApplyHighlight(activeStyle, activeColor)}
+        >
+          应用
+        </button>
         <button type="button" className="action-btn" onClick={onOpenNote}>
           📝 笔记
         </button>

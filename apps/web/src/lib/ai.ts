@@ -90,3 +90,151 @@ export async function chat(req: AIChatRequest): Promise<AIChatResponse> {
     };
   }
 }
+
+// ─── Streaming chat ────────────────────────────────────────────────
+
+export interface CitationFromServer {
+  id: string;
+  bookId: string;
+  bookTitle: string;
+  chapterId?: string | null;
+  chapterTitle?: string | null;
+  snippet: string;
+}
+
+export interface StreamChatOptions {
+  bookId?: string;
+  providerId?: string;
+  excerpt?: string | null;
+  messages: AIMessage[];
+  signal?: AbortSignal;
+  /** Called once at the start of the stream with the citations the
+   *  server retrieved. Empty array if retrieval was not performed
+   *  (e.g. no book scope). */
+  onCitations?: (citations: CitationFromServer[]) => void;
+  /** Called for each text delta. */
+  onChunk: (delta: string) => void;
+}
+
+/**
+ * Stream a chat response via SSE.
+ *
+ * Wire format (one event per line group, terminated by blank line):
+ *
+ *   event: citations
+ *   data: [{...}, {...}]
+ *
+ *   event: delta
+ *   data: { "text": "..." }
+ *
+ *   event: done
+ *   data: {}
+ *
+ *   event: error
+ *   data: { "message": "..." }
+ *
+ * The default event ('message' in EventSource terms) is unused — every
+ * frame is named explicitly so we can route without inspecting payload.
+ *
+ * Why we don't use EventSource: it can't send a POST body, and we need
+ * to send the chat request as JSON. Manual fetch + ReadableStream gives
+ * us SSE semantics with a body.
+ */
+export async function streamChat(opts: StreamChatOptions): Promise<void> {
+  const body = {
+    bookId: opts.bookId,
+    providerId: opts.providerId,
+    excerpt: opts.excerpt,
+    messages: opts.messages,
+    stream: true,
+  };
+  const res = await fetch('/api/ai/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(body),
+    credentials: 'same-origin',
+    signal: opts.signal,
+  });
+
+  if (!res.ok) {
+    // The server might have responded JSON (validation/auth error).
+    // Try to surface its message; otherwise give a generic one.
+    let msg = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j?.error?.message) msg = j.error.message;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  if (!res.body) {
+    throw new Error('服务器没有返回流');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buf = '';
+
+  // SSE frames are separated by a blank line. We accumulate in `buf`
+  // until we see "\n\n", then parse the headers / data lines.
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep = buf.indexOf('\n\n');
+    while (sep !== -1) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      handleSseFrame(frame, opts);
+      sep = buf.indexOf('\n\n');
+    }
+  }
+  if (buf.trim().length > 0) handleSseFrame(buf, opts);
+}
+
+function handleSseFrame(frame: string, opts: StreamChatOptions): void {
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trim());
+    }
+    // ignore id:, retry:, comments
+  }
+  if (dataLines.length === 0) return;
+  const data = dataLines.join('\n');
+
+  switch (event) {
+    case 'citations': {
+      try {
+        const cits = JSON.parse(data) as CitationFromServer[];
+        opts.onCitations?.(cits);
+      } catch { /* ignore malformed frame */ }
+      break;
+    }
+    case 'delta': {
+      try {
+        const j = JSON.parse(data) as { text?: string };
+        if (j.text) opts.onChunk(j.text);
+      } catch { /* ignore */ }
+      break;
+    }
+    case 'error': {
+      try {
+        const j = JSON.parse(data) as { message?: string };
+        throw new Error(j.message ?? '上游错误');
+      } catch (e) {
+        if (e instanceof Error) throw e;
+        throw new Error('上游错误');
+      }
+    }
+    case 'done':
+      break;
+    default:
+      break;
+  }
+}

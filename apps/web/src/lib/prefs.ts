@@ -11,8 +11,18 @@
 //                         formats (TXT/EPUB-as-text). EpubReader (epub.js)
 //                         falls back to 'scroll-chapter' under the hood.
 //
-// tocPinned keeps the table-of-contents drawer permanently docked on
-// the left, shrinking the reader column.
+// The TOC drawer is always docked — we no longer have a `tocPinned`
+// pref. The header's TOC button toggles VISIBILITY of the dock so a
+// narrow viewport can still claim the full reader column when wanted.
+// Removing the legacy field keeps the project to one source of truth
+// instead of two competing toggles.
+//
+// styleColors records the user's last-picked colour PER style. The
+// reader page header now exposes one swatch row PER style (highlight
+// / underline / wavy / strike), each remembering its own colour. New
+// annotations of style X start with styleColors[X]. Existing
+// annotations are NEVER auto-recoloured — the user has to click them
+// and pick a new colour explicitly.
 //
 // Numeric controls:
 //   • fontSize    — px, 12 .. 32, step 1, default 18
@@ -161,12 +171,19 @@ export interface ReaderPrefs {
   lineHeight: number;     // multiplier
   columnWidth: number;    // rem (was an enum; now free-form)
   pageMode: PageMode;
-  tocPinned: boolean;
+  /** Per-style memory of the last colour the user picked. Used to
+   *  seed the SelectionToolbar when the user creates a NEW annotation
+   *  of the given style. Existing annotations are not affected. */
+  styleColors: {
+    highlight: 'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
+    underline: 'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
+    wavy:      'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
+    strike:    'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
+  };
   /** AI assistant panel pinned as a floating card. When pinned the
    *  panel doesn't take a backdrop and stays visible while the user
    *  reads — sized small, draggable, parked in the bottom-right by
-   *  default. Distinct from `tocPinned`, which docks the TOC into the
-   *  flex layout instead. */
+   *  default. */
   aiPinned?: boolean;
 }
 
@@ -177,7 +194,12 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   lineHeight: 1.85,
   columnWidth: 85,
   pageMode: 'paginated',
-  tocPinned: false,
+  styleColors: {
+    highlight: 'yellow',
+    underline: 'blue',
+    wavy:      'red',
+    strike:    'purple',
+  },
   aiPinned: false,
 };
 
@@ -233,17 +255,17 @@ export function loadPrefs(): ReaderPrefs {
       localStorage.getItem(STORAGE_KEY) ??
       localStorage.getItem(STORAGE_KEY_V2) ??
       localStorage.getItem(STORAGE_KEY_V1);
-    if (!raw) return { ...DEFAULT_PREFS };
-    const parsed = JSON.parse(raw) as Omit<Partial<ReaderPrefs>, 'fontFamily' | 'columnWidth'> & {
+    if (!raw) return clonePrefs(DEFAULT_PREFS);
+    const parsed = JSON.parse(raw) as Omit<Partial<ReaderPrefs>, 'fontFamily' | 'columnWidth' | 'styleColors'> & {
       // Legacy enum shapes — we accept and migrate. Wider type than
       // ReaderPrefs since older versions stored string enums here, and
-      // a Partial<...> intersection isn't enough to reopen the field
-      // (TS's intersection of `number | undefined` and `unknown` is
-      // still `number | undefined`, which would forbid the string
-      // comparisons below).
+      // a Partial<...> intersection isn't enough to reopen the field.
       fontFamily?: unknown;
       columnWidth?: unknown;
+      styleColors?: unknown;
+      tocPinned?: unknown;  // legacy field; ignored — we no longer support it
     };
+    void parsed.tocPinned;  // explicitly drop legacy field
 
     // Migrate legacy fontFamily ('serif' | 'sans') → font id.
     let fontFamily: FontId = DEFAULT_PREFS.fontFamily;
@@ -259,15 +281,12 @@ export function loadPrefs(): ReaderPrefs {
     //   • 'narrow'/'normal'/'wide' (v1 enum) → 60 / 80 / 95
     //   • 24 .. 60 (rem, v2 / early v3)        → mapped to 50 .. 100 %
     //   • already in 50 .. 100 (current)        → kept as-is.
-    // We detect the rem regime by seeing a value <= 60 that isn't
-    // already in our 50-100 window — i.e. < 50.
     let columnWidth: number = DEFAULT_PREFS.columnWidth;
     if (typeof parsed.columnWidth === 'number' && Number.isFinite(parsed.columnWidth)) {
       const v = parsed.columnWidth;
       if (v >= COLUMN_WIDTH.min && v <= COLUMN_WIDTH.max) {
         columnWidth = clamp(v, COLUMN_WIDTH.min, COLUMN_WIDTH.max);
       } else if (v >= 24 && v <= 60) {
-        // Legacy rem → percentage. Linear: 24rem→50%, 38rem→80%, 60rem→100%.
         const pct = Math.round(50 + ((v - 24) / (60 - 24)) * 50);
         columnWidth = clamp(pct, COLUMN_WIDTH.min, COLUMN_WIDTH.max);
       } else {
@@ -281,6 +300,10 @@ export function loadPrefs(): ReaderPrefs {
       columnWidth = 80;
     }
 
+    // Per-style colour memory. Old prefs files don't have this — fall
+    // back to the defaults.
+    const styleColors = parseStyleColors(parsed.styleColors);
+
     return {
       theme: parsed.theme && isThemeId(parsed.theme) ? parsed.theme : DEFAULT_PREFS.theme,
       fontSize: clamp(parsed.fontSize ?? DEFAULT_PREFS.fontSize, FONT_SIZE.min, FONT_SIZE.max),
@@ -291,11 +314,35 @@ export function loadPrefs(): ReaderPrefs {
         parsed.pageMode === 'scroll-chapter' || parsed.pageMode === 'scroll-book'
           ? parsed.pageMode
           : 'paginated',
-      tocPinned: !!parsed.tocPinned,
+      styleColors,
+      aiPinned: !!parsed.aiPinned,
     };
   } catch {
-    return { ...DEFAULT_PREFS };
+    return clonePrefs(DEFAULT_PREFS);
   }
+}
+
+function clonePrefs(p: ReaderPrefs): ReaderPrefs {
+  return { ...p, styleColors: { ...p.styleColors } };
+}
+
+const VALID_COLORS = new Set(['yellow', 'red', 'green', 'blue', 'purple', 'orange']);
+function parseStyleColors(raw: unknown): ReaderPrefs['styleColors'] {
+  const def = DEFAULT_PREFS.styleColors;
+  if (!raw || typeof raw !== 'object') return { ...def };
+  const r = raw as Record<string, unknown>;
+  const pick = (k: keyof ReaderPrefs['styleColors']): ReaderPrefs['styleColors'][typeof k] => {
+    const v = r[k];
+    return typeof v === 'string' && VALID_COLORS.has(v)
+      ? (v as ReaderPrefs['styleColors'][typeof k])
+      : def[k];
+  };
+  return {
+    highlight: pick('highlight'),
+    underline: pick('underline'),
+    wavy:      pick('wavy'),
+    strike:    pick('strike'),
+  };
 }
 
 export function savePrefs(p: ReaderPrefs): void {

@@ -81,15 +81,20 @@ type chatRequest struct {
 	// the model knows the selection is the subject of the next user
 	// question rather than just preamble.
 	Excerpt string `json:"excerpt,omitempty"`
-	// Optional book id — currently unused by the proxy, kept on the
-	// wire so future per-book context retrieval (RAG) can hook in
-	// without changing the request shape.
+	// Book id — when set AND the request asks for streaming, the
+	// server runs RAG retrieval (FTS5 + vector rerank) and prepends
+	// the top passages to the system prompt, then emits them as
+	// citation events on the wire. Empty bookId == no retrieval.
 	BookID    string `json:"bookId,omitempty"`
 	ChapterID string `json:"chapterId,omitempty"`
 	// When set, route to the named user-imported provider instead of
 	// the built-in Anthropic proxy. Lookup scoped to user_id, so a
 	// caller can't reach another user's profile.
 	ProviderID string `json:"providerId,omitempty"`
+	// Streaming flag. When true, the response is text/event-stream
+	// and the client receives `citations`, `delta`, and `done` events.
+	// When false (the default) we do the legacy single JSON response.
+	Stream bool `json:"stream,omitempty"`
 }
 
 // HandleChat proxies a chat turn. By default it uses the server's
@@ -98,9 +103,10 @@ type chatRequest struct {
 // profile instead — that path bypasses the system quota and rate-limit
 // enforcement (it's the user's own account).
 //
-// We deliberately do not stream — the reader UI is happy to wait for a
-// complete answer, and streaming requires SSE plumbing that's not
-// pulling its weight yet.
+// Streaming branch:
+//
+//	When req.Stream is true, we switch to text/event-stream framing.
+//	See sse.go for the helpers and rag.go for the retrieval step.
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 
@@ -115,6 +121,11 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Messages) > 32 {
 		req.Messages = req.Messages[len(req.Messages)-32:]
+	}
+
+	if req.Stream {
+		h.handleChatStream(w, r, user.ID, req)
+		return
 	}
 
 	// Routing: explicit providerId => user's custom AI; otherwise
@@ -316,7 +327,7 @@ func (h *Handler) handleChatViaProvider(w http.ResponseWriter, r *http.Request, 
 			excerpt = excerpt[:8000] + "…"
 		}
 		upMsgs = append(upMsgs, openaiMsg{
-			Role: "system",
+			Role:    "system",
 			Content: "You are a helpful reading companion. Ground your answer in this EXCERPT FROM THE BOOK:\n" + excerpt,
 		})
 	}
@@ -343,7 +354,7 @@ func (h *Handler) handleChatViaProvider(w http.ResponseWriter, r *http.Request, 
 	}
 	upReq, err := NewSafeRequest(r.Context(), base, http.MethodPost, "/chat/completions", buf)
 	if err != nil {
-		response.Fail(w, http.StatusBadRequest, response.CodeValidation, "URL 构造失败：" + err.Error())
+		response.Fail(w, http.StatusBadRequest, response.CodeValidation, "URL 构造失败："+err.Error())
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")

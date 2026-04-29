@@ -339,9 +339,11 @@ body {
 .page-nav-btn-left  { left: 12px; }
 .page-nav-btn-right { right: 12px; }
 
-/* Click zones — invisible buttons covering the left third / right
-   third of the reader. They sit BELOW page-nav-btn (so the explicit
-   buttons still receive clicks) and BELOW any selection overlay. */
+/* Click zones — invisible regions covering the left third / right
+   third of the reader. We use `pointer-events: none` so they don't
+   intercept text selection; PageNav installs a click handler on the
+   outer container that decides "click in the left third with no
+   selection → prev page" instead. */
 .page-zone {
   position: absolute;
   top: 0;
@@ -349,14 +351,11 @@ body {
   z-index: 5;
   background: transparent;
   border: 0;
-  cursor: pointer;
-  /* Invisible by default — we don't want to give the user the wrong
-     impression that the entire third of the page is some clickable
-     widget. The cursor change on hover plus the page flip is the
-     feedback. */
+  pointer-events: none;
+  cursor: default;
 }
-.page-zone-left  { left: 0;  width: 33.333%; cursor: w-resize; }
-.page-zone-right { right: 0; width: 33.333%; cursor: e-resize; }
+.page-zone-left  { left: 0;  width: 33.333%; }
+.page-zone-right { right: 0; width: 33.333%; }
 
 /* ─────────────────────────────────────────────────────────────────
    Selection toolbar — a small floating popover above the user's
@@ -448,6 +447,54 @@ body {
 }
 .selection-toolbar .action-btn:hover {
   background: rgba(0, 0, 0, 0.05);
+}
+.selection-toolbar .action-btn.primary-action {
+  background: var(--reader-accent);
+  color: #fff;
+  font-weight: 500;
+}
+.selection-toolbar .action-btn.primary-action:hover {
+  filter: brightness(0.92);
+  background: var(--reader-accent);
+}
+
+/* Per-style colour pill in the reader header. Each pill = a 4-letter
+   style label tag + a coloured swatch dot. Click cycles the colour. */
+.style-color-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 6px 0 4px;
+  border-radius: 11px;
+  font-size: 11px;
+  line-height: 1;
+  background: rgba(0, 0, 0, 0.04);
+  color: inherit;
+  opacity: 0.85;
+  transition: opacity 120ms, background 120ms;
+}
+.style-color-pill:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.08);
+}
+[data-reader-theme="dark"] .style-color-pill {
+  background: rgba(255, 255, 255, 0.06);
+}
+[data-reader-theme="dark"] .style-color-pill:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.style-color-pill-label {
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+.style-color-pill-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(0, 0, 0, 0.15);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6) inset;
 }
 
 /* Note editor (a tiny textarea that pops out below an existing
@@ -636,6 +683,25 @@ body {
   -webkit-line-clamp: 3;
   line-clamp: 3;
   overflow: hidden;
+}
+.snippet-2-lines {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* Streaming-cursor effect for assistant bubbles still being filled. */
+.ai-cursor {
+  display: inline-block;
+  margin-left: 1px;
+  width: 0.55em;
+  animation: ai-cursor-blink 0.9s steps(2, start) infinite;
+  color: var(--reader-accent, #c87f4a);
+}
+@keyframes ai-cursor-blink {
+  to { visibility: hidden; }
 }
 
 /* Keyword highlight inside snippets. Subtle so a long match doesn't

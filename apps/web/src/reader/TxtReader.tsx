@@ -32,12 +32,17 @@ import { api } from '../lib/api';
 import { columnMaxWidth, fontFamilyOf, type ReaderPrefs, type PageMode } from '../lib/prefs';
 import {
   applyAllHighlights,
-  charRangeToRange,
   clearHighlights,
-  encodeLocator,
-  rangeToCharRange,
+  encodeLocatorFromRange,
   wrapRange,
 } from '../lib/annotations';
+import {
+  topVisibleAnchor,
+  navigateToCFIv2,
+  decodeLocatorAny,
+  encodeLocatorV2,
+  type CFIv2,
+} from '../lib/locator';
 import {
   type Highlight,
   type HighlightColor,
@@ -78,29 +83,36 @@ interface Props {
   onReady?: () => void;
   onBusy?: (busy: boolean) => void;
   onSelection?: (text: string | null) => void;
-  /** Default colour for new highlights — sourced from the header
-   *  swatch row in ReaderPage. The SelectionToolbar still lets users
-   *  override per-highlight, but tapping "高亮" without picking a
-   *  colour first now uses this. */
-  activeColor?: HighlightColor;
+  /** Per-style default colour for new annotations. Sourced from
+   *  prefs.styleColors. The SelectionToolbar lets the user override
+   *  per-annotation; existing annotations are NEVER auto-recoloured. */
+  styleColors: ReaderPrefs['styleColors'];
+  /** Called whenever the user lands on a new "current" paragraph
+   *  (paginated: page flip / chapter load; scroll: throttled scroll).
+   *  ReaderPage uses this to persist a CFIv2 progress anchor and to
+   *  highlight the active TOC node. */
+  onProgressAnchor?: (anchor: { chapterId: string; locator: string } | null) => void;
+  /** Called whenever the topmost visible paragraph's enclosing
+   *  TOC chapter changes — used by ReaderPage to drive the active
+   *  TOC entry without it lagging behind page flips. */
+  onActiveChapterChange?: (chapterId: string) => void;
+  /** Initial progress locator. When set on first mount, the reader
+   *  navigates to the matching paragraph after the chapter renders. */
+  initialAnchor?: { chapterId: string; locator: string } | null;
   /** When set, the reader scans the rendered chapter for this string,
    *  wraps every match in a temporary <mark.search-flash> span, and
    *  scrolls the first match into view. The flash auto-clears after
    *  3 seconds. Used by the search-result jump path. */
   searchKeyword?: string | null;
-  /** Only flash matches when the rendered chapter equals this id.
-   *  Without this gate, every chapter the user navigates to would
-   *  flash the keyword again, which they didn't ask for. */
   searchTargetChapterId?: string | null;
-  /** Called once after a successful search-flash so the parent can
-   *  strip the URL parameters that triggered it. */
   onSearchHandled?: () => void;
 }
 
 export default function TxtReader({
   bookId, prefs, chapterOrd, pageMode,
   onChapterChange, onReady, onBusy, onSelection,
-  activeColor, searchKeyword, searchTargetChapterId, onSearchHandled,
+  styleColors, onProgressAnchor, onActiveChapterChange, initialAnchor,
+  searchKeyword, searchTargetChapterId, onSearchHandled,
 }: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([]);
   const [body, setBody] = useState<ChapterBody | null>(null);
@@ -118,11 +130,13 @@ export default function TxtReader({
   const [tbAnchor, setTbAnchor] = useState<DOMRect | null>(null);
   const [tbCurrent, setTbCurrent] = useState<Highlight | null>(null);
   const readyFiredRef = useRef(false);
+  const anchorRestoredRef = useRef(false);
 
   // Load chapter list once.
   useEffect(() => {
     let cancelled = false;
     onBusy?.(true);
+    anchorRestoredRef.current = false;  // new book → restore anchor again
     api.get<{ chapters: ChapterMeta[] }>(`/api/books/${bookId}/chapters/list`)
       .then(d => {
         if (cancelled) return;
@@ -160,6 +174,10 @@ export default function TxtReader({
         setBody(d.chapter);
         setPageIdx(0);
         if (scrollRef.current) scrollRef.current.scrollTo({ top: 0 });
+        // Tell ReaderPage which chapter is now displayed so the TOC
+        // dock can update its highlighted entry without lagging behind
+        // the page-flip path.
+        onActiveChapterChange?.(d.chapter.id);
       })
       .catch(e => !cancelled && setError(e.message))
       .finally(() => !cancelled && onBusy?.(false));
@@ -200,15 +218,17 @@ export default function TxtReader({
       // proseRef's PARENT (the div with columnWidth:100% / columnFill:
       // auto inside PaginatedFrame). proseRef itself is just a single
       // block element being flowed into columns — its own scrollWidth
-      // reports a single column width, which is why a naive
-      // root.scrollWidth read collapses pageCount to 1 and makes the
-      // reader jump to the next chapter on page 1.
+      // reports a single column width, so we measure on the parent.
+      //
+      // We use Math.ceil rather than round: a chapter that overflows
+      // by even one line needs a second page to be flippable. The old
+      // round() cost the user the last page on chapters whose final
+      // text didn't fill more than half the column.
       const track = root.parentElement as HTMLElement | null;
-      // First-pass measurement (covers the common case).
       if (track) {
         const total = track.scrollWidth;
         const view = track.clientWidth || 1;
-        setPageCount(Math.max(1, Math.round(total / view)));
+        setPageCount(Math.max(1, Math.ceil(total / view)));
       } else {
         setPageCount(1);
       }
@@ -220,7 +240,7 @@ export default function TxtReader({
         if (!t) return;
         const total = t.scrollWidth;
         const view = t.clientWidth || 1;
-        const pages = Math.max(1, Math.round(total / view));
+        const pages = Math.max(1, Math.ceil(total / view));
         setPageCount(pages);
         setPageIdx(i => Math.min(i, pages - 1));
       });
@@ -254,7 +274,7 @@ export default function TxtReader({
       if (!t) return;
       const total = t.scrollWidth;
       const view = t.clientWidth || 1;
-      const pages = Math.max(1, Math.round(total / view));
+      const pages = Math.max(1, Math.ceil(total / view));
       setPageCount(pages);
       setPageIdx(i => Math.min(i, pages - 1));
     };
@@ -269,6 +289,91 @@ export default function TxtReader({
       ro?.disconnect();
     };
   }, [pageMode]);
+
+  // ── Progress restore ────────────────────────────────────────────
+  // After a chapter renders (and pagination has settled), if the
+  // initial anchor matches THIS chapter, navigate to its paragraph.
+  // Once consumed we set anchorRestoredRef so subsequent chapter
+  // changes (user navigation) don't try to re-anchor.
+  useEffect(() => {
+    if (anchorRestoredRef.current) return;
+    if (!body || !initialAnchor) return;
+    if (initialAnchor.chapterId !== body.id) return;
+    const root = proseRef.current;
+    if (!root) return;
+    const dec = decodeLocatorAny(initialAnchor.locator);
+    if (!dec) return;
+    // Wait two frames so multicol has measured.
+    const raf1 = requestAnimationFrame(() => {
+      const raf2 = requestAnimationFrame(() => {
+        const r = root;
+        if (!r) return;
+        const trackEl = r.parentElement as HTMLElement | null;
+        const cfi: CFIv2 | null = dec.version === 'cfiv2' && dec.steps
+          ? { chapterId: dec.chapterId ?? body.id, steps: dec.steps }
+          : null;
+        if (!cfi) return;
+        navigateToCFIv2(r, cfi, undefined, {
+          paginated: pageMode === 'paginated',
+          trackWidth: trackEl?.clientWidth ?? 0,
+          onPage: idx => setPageIdx(idx),
+          onScroll: el => el.scrollIntoView({ block: 'start', behavior: 'auto' }),
+        });
+        anchorRestoredRef.current = true;
+      });
+      void raf2;
+    });
+    return () => cancelAnimationFrame(raf1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body, initialAnchor, pageMode, html]);
+
+  // ── Progress emit ───────────────────────────────────────────────
+  // When the user flips a page (paginated) or scrolls (scroll mode),
+  // report a CFIv2 anchor for the topmost visible paragraph. Throttled
+  // so rapid page-flips don't spam the parent.
+  useEffect(() => {
+    if (!body) return;
+    const root = proseRef.current;
+    if (!root) return;
+
+    const emit = () => {
+      const r = proseRef.current;
+      if (!r) return;
+      const anchor = topVisibleAnchor(r, body.id);
+      if (!anchor) {
+        onProgressAnchor?.(null);
+        return;
+      }
+      onProgressAnchor?.({
+        chapterId: body.id,
+        locator: encodeLocatorV2(anchor),
+      });
+    };
+
+    if (pageMode === 'paginated') {
+      // Page index changed — wait one frame for the transform to
+      // settle, then emit.
+      const raf = requestAnimationFrame(emit);
+      return () => cancelAnimationFrame(raf);
+    } else {
+      const sc = scrollRef.current;
+      if (!sc) return;
+      let timer: number | null = null;
+      const onScroll = () => {
+        if (timer != null) window.clearTimeout(timer);
+        timer = window.setTimeout(emit, 150);
+      };
+      sc.addEventListener('scroll', onScroll, { passive: true });
+      // First emit so the parent has an initial anchor.
+      const raf = requestAnimationFrame(emit);
+      return () => {
+        if (timer != null) window.clearTimeout(timer);
+        cancelAnimationFrame(raf);
+        sc.removeEventListener('scroll', onScroll);
+      };
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body, pageIdx, pageMode]);
 
   // ── Search-result flash ─────────────────────────────────────────
   // When the user arrives via /search, ReaderPage forwards the keyword
@@ -425,9 +530,8 @@ export default function TxtReader({
     if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
     const text = range.toString();
     if (!text || text.trim().length === 0) return;
-    const cr = rangeToCharRange(root, range);
-    if (!cr) return;
-    const locator = encodeLocator(body.id, cr);
+    const locator = encodeLocatorFromRange(root, body.id, range);
+    if (!locator) return;
 
     try {
       const created = await createHighlight(bookId, {
@@ -438,10 +542,9 @@ export default function TxtReader({
         style,
       });
       // Wrap the live range immediately so the user sees the result
-      // without a chapter re-render.
+      // without waiting for the next chapter re-render.
       try {
-        const freshRange = charRangeToRange(root, cr);
-        if (freshRange) wrapRange(freshRange, created, false);
+        wrapRange(range.cloneRange(), created, false);
       } catch { /* re-render fallback in next setHighlights tick */ }
       setHighlights(prev => [...prev, created]);
       sel.removeAllRanges();
@@ -524,23 +627,22 @@ export default function TxtReader({
     }
 
     // Path B: brand-new note from a fresh selection. We create both a
-    // highlight (using the user's currently-selected colour from the
-    // header swatch row, default 'yellow') and a note linked to it.
+    // highlight (using the highlight-style colour from styleColors —
+    // notes are bound to a highlight visually) and a note linked to it.
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
     if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
     const txt = range.toString();
     if (!txt || txt.trim().length === 0) return;
-    const cr = rangeToCharRange(root, range);
-    if (!cr) return;
-    const locator = encodeLocator(body.id, cr);
+    const locator = encodeLocatorFromRange(root, body.id, range);
+    if (!locator) return;
     try {
       const hl = await createHighlight(bookId, {
         chapterId: body.id,
         locator,
         selectedText: txt,
-        color: activeColor ?? 'yellow',
+        color: styleColors.highlight,
         style: 'highlight',
       });
       const note = await createNote(bookId, {
@@ -553,8 +655,7 @@ export default function TxtReader({
       setHighlights(prev => [...prev, hl]);
       setNotes(prev => [...prev, note]);
       try {
-        const freshRange = charRangeToRange(root, cr);
-        if (freshRange) wrapRange(freshRange, hl, true);
+        wrapRange(range.cloneRange(), hl, true);
       } catch { /* fallthrough to next render */ }
       sel.removeAllRanges();
     } catch (e) {
@@ -563,7 +664,7 @@ export default function TxtReader({
     setTbMode(null);
     setTbAnchor(null);
     onSelection?.(null);
-  }, [tbCurrent, body, bookId, notes, onSelection, activeColor]);
+  }, [tbCurrent, body, bookId, notes, onSelection, styleColors]);
 
   const onDeleteNote = useCallback(async () => {
     if (!tbCurrent) return;
@@ -666,7 +767,7 @@ export default function TxtReader({
           current={tbCurrent}
           noteBody={noteForCurrent}
           hasNote={hasNoteForCurrent}
-          defaultColor={activeColor ?? 'yellow'}
+          styleColors={styleColors}
           onApplyHighlight={onApplyHighlight}
           onOpenNote={onOpenNote}
           onSaveNote={onSaveNote}
@@ -680,9 +781,27 @@ export default function TxtReader({
   );
 }
 
-// PaginatedFrame implements horizontal pagination via CSS columns. The
-// children fill a column track that's wider than the viewport; we
-// translate it left by -pageIdx * viewportWidth to flip pages.
+// PaginatedFrame implements horizontal pagination via CSS columns.
+//
+// Layout (THREE nested elements — earlier 2-element layout had a
+// subtle bug: padding + multicol on the same node meant translateX
+// shifted by `100% of padding-box`, which is bigger than `100% of
+// content-box`. That excess shift on every page produced "first page
+// blank, content cut between pages, last page lost" — the symptom
+// we hit on long Chinese chapters):
+//
+//   <viewport>            // overflow:hidden, this is the visible area
+//     <padder>            // padding only, defines the *content* box
+//       <track>           // columns + translateX live HERE
+//         {children}      // the prose
+//       </track>
+//     </padder>
+//   </viewport>
+//
+// `track`'s `width: 100%` is 100% of its parent's content-box, which
+// EXCLUDES padding. So the column page width = the viewport width
+// minus padding, and translateX(-100%) shifts by exactly that. Pages
+// align cleanly.
 function PaginatedFrame({
   pageIdx, pageCount, prefs, bodyFontFamily, children,
 }: {
@@ -694,28 +813,43 @@ function PaginatedFrame({
 }) {
   void pageCount;
   return (
-    <div className="h-full w-full" style={{ overflow: 'hidden' }}>
+    <div
+      className="h-full w-full"
+      style={{ overflow: 'hidden', boxSizing: 'border-box' }}
+    >
       <div
-        className="h-full"
         style={{
+          height: '100%',
           padding: '3rem 1.5rem',
           maxWidth: columnMaxWidth(prefs),
           margin: '0 auto',
-          height: '100%',
-          fontSize: prefs.fontSize + 'px',
-          lineHeight: prefs.lineHeight,
-          fontFamily: bodyFontFamily,
-          // CSS columns: column-width:100% gives us one column == one
-          // page, the column track scrolls horizontally. We then move
-          // the track via translateX to "flip".
-          columnWidth: '100%',
-          columnGap: '0',
-          columnFill: 'auto',
-          transform: `translateX(calc(-${pageIdx} * 100%))`,
-          transition: 'transform 220ms cubic-bezier(0.2, 0, 0, 1)',
+          boxSizing: 'border-box',
+          overflow: 'hidden',
         }}
       >
-        {children}
+        <div
+          className="reader-paginated-track"
+          style={{
+            height: '100%',
+            width: '100%',
+            boxSizing: 'border-box',
+            fontSize: prefs.fontSize + 'px',
+            lineHeight: prefs.lineHeight,
+            fontFamily: bodyFontFamily,
+            // CSS columns: column-width:100% gives us one column ==
+            // one viewport-width-of-content. column-fill:auto keeps
+            // columns at the track's height (otherwise Chrome
+            // distributes content evenly across the track's columns,
+            // which we don't want — we want pages packed top-down).
+            columnWidth: '100%',
+            columnGap: '0',
+            columnFill: 'auto',
+            transform: `translateX(${-pageIdx * 100}%)`,
+            transition: 'transform 220ms cubic-bezier(0.2, 0, 0, 1)',
+          }}
+        >
+          {children}
+        </div>
       </div>
     </div>
   );

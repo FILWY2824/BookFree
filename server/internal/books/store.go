@@ -111,26 +111,44 @@ func FindByID(ctx context.Context, db *sql.DB, userID, bookID string) (*models.B
 
 // listAssetKeys returns every storage_key recorded against this book.
 // We collect keys BEFORE the DELETE so that ON DELETE CASCADE doesn't
-// erase our reference list.
+// erase our reference list. We pull from BOTH `book_assets` (the
+// canonical tracker for uploaded blobs) AND `books.cover_storage_key`
+// (denormalised — covers don't always have a corresponding row in
+// book_assets). Missing either source means files leak.
 func listAssetKeys(ctx context.Context, tx *sql.Tx, userID, bookID string) ([]string, error) {
+	var keys []string
+
 	rows, err := tx.QueryContext(ctx,
 		`SELECT storage_key FROM book_assets WHERE book_id = ? AND user_id = ?`,
 		bookID, userID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var keys []string
 	for rows.Next() {
 		var k string
 		if err := rows.Scan(&k); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		if k != "" {
 			keys = append(keys, k)
 		}
 	}
-	return keys, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	var cover sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT cover_storage_key FROM books WHERE id = ? AND user_id = ?`,
+		bookID, userID).Scan(&cover)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if cover.Valid && cover.String != "" {
+		keys = append(keys, cover.String)
+	}
+	return keys, nil
 }
 
 // Delete removes a book row + all dependent rows via cascade. Returns

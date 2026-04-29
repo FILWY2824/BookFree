@@ -1,30 +1,34 @@
 // /ai — full-page AI conversation surface.
 //
-// Differs from the in-reader AIChatPanel in two ways:
-//
-//   1. Scope toggle. The user picks "全部书库" or one specific book
-//      from a dropdown. When a book is chosen we send its bookId
-//      with the chat request so the server can ground answers in
-//      that book's content (the existing /api/ai/chat already
-//      accepts bookId — the proxy uses it as a future RAG hook).
-//
-//   2. Inline search. Below the conversation, we let the user run a
-//      keyword search against the same library. This is the user's
-//      requested "AI 结合用户输入与书籍内容回答；并展示原文检索
-//      结果" — they get the model answer AND the underlying source
-//      snippets at the same time, so the answer is verifiable.
+// Single-column layout. The previous version had a side-by-side
+// "chat | search" split — the user explicitly asked us to drop the
+// search panel, since the AI answer is supposed to ALREADY ground
+// itself in retrieved passages. The retrieval becomes a server-side
+// concern: when the request is scoped to a book, the server runs
+// FTS5 + vector rerank to assemble context, then asks the LLM to
+// answer using THAT context. The retrieved passages come back with
+// the answer as `citations`, and we render them as small cards
+// directly under the assistant's bubble. The user gets one panel
+// to read, with the source-of-truth right where they need it.
 //
 // Provider toggle:
 //   We expose a "使用：内置 AI / <自定义 AI>" picker that mirrors the
 //   user's saved provider profiles. When a custom profile is picked,
 //   we pass providerId to /api/ai/chat. Otherwise the server uses the
 //   built-in path with quota enforcement.
+//
+// Streaming:
+//   The chat endpoint streams responses via SSE so the user sees the
+//   answer materialise. We accumulate text in the in-progress
+//   assistant message and finalise once the stream closes. Citations
+//   are sent as a separate SSE event before the text stream begins
+//   so the UI can render them above the answer immediately.
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { api, ApiException } from '../lib/api';
+import { api } from '../lib/api';
 import DashboardChrome from '../components/DashboardChrome';
-import { chat, type AIMessage } from '../lib/ai';
+import { streamChat, type AIMessage } from '../lib/ai';
 import { truncate } from '../lib/format';
 
 interface BookRow { id: string; title: string; status: string; }
@@ -36,24 +40,30 @@ interface ProviderRow {
   hasKey: boolean;
 }
 
-interface UIMsg extends AIMessage {
-  id: string;
-  error?: boolean;
-}
-
-interface ChunkHit {
+interface Citation {
+  /** Stable id for keying React lists. */
   id: string;
   bookId: string;
   bookTitle: string;
+  chapterId?: string | null;
   chapterTitle?: string | null;
-  pageNo?: number | null;
+  /** First ~140 chars of the matched passage, with the user's
+   *  query terms wrapped in <mark> by the server. */
   snippet: string;
-  plainSnippet: string;
 }
 
-interface NoteHit { id: string; bookId: string; bookTitle: string; snippet: string; }
-
-interface SearchResp { q: string; chunks: ChunkHit[]; notes: NoteHit[]; }
+interface UIMsg extends AIMessage {
+  id: string;
+  error?: boolean;
+  /** Citations only present on assistant messages that were grounded
+   *  in retrieved passages. The chat endpoint emits them at the start
+   *  of the stream so we can render them as soon as we have the
+   *  outline of an answer. */
+  citations?: Citation[];
+  /** True while the message is still being streamed. We use this to
+   *  show a typing-cursor effect at the end of the bubble. */
+  pending?: boolean;
+}
 
 export default function AIChatPage() {
   const [books, setBooks] = useState<BookRow[]>([]);
@@ -63,11 +73,8 @@ export default function AIChatPage() {
   const [messages, setMessages] = useState<UIMsg[]>([]);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
-  const [searchQ, setSearchQ] = useState('');
-  const [searchBusy, setSearchBusy] = useState(false);
-  const [searchResults, setSearchResults] = useState<SearchResp | null>(null);
-  const [searchErr, setSearchErr] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -80,6 +87,8 @@ export default function AIChatPage() {
       const def = (p.providers ?? []).find(x => x.isDefault && x.enabled && x.hasKey);
       if (def) setProviderId(def.id);
     });
+    // Abort any in-flight chat on unmount.
+    return () => abortRef.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -91,53 +100,51 @@ export default function AIChatPage() {
     const text = draft.trim();
     if (!text || busy) return;
     const userMsg: UIMsg = { id: rid(), role: 'user', content: text };
+    const assistantId = rid();
     const history = [...messages, userMsg];
-    setMessages(history);
+    setMessages([
+      ...history,
+      { id: assistantId, role: 'assistant', content: '', pending: true },
+    ]);
     setDraft('');
     setBusy(true);
-    const r = await chat({
-      bookId: scope === 'all' ? undefined : scope,
-      messages: history.map(m => ({ role: m.role, content: m.content })),
-      // Custom-provider routing if selected; chat() already understands
-      // any extra fields on the request body.
-      ...(providerId ? { providerId } : {}),
-    } as Parameters<typeof chat>[0] & { providerId?: string });
-    setBusy(false);
-    if (r.errorMessage) {
-      setMessages(m => [...m, { id: rid(), role: 'assistant', error: true, content: r.errorMessage! }]);
-      return;
+
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      await streamChat({
+        bookId: scope === 'all' ? undefined : scope,
+        providerId: providerId || undefined,
+        messages: history.map(m => ({ role: m.role, content: m.content })),
+        signal: ac.signal,
+        onCitations: (cits) => {
+          setMessages(m => m.map(x => x.id === assistantId
+            ? { ...x, citations: cits }
+            : x));
+        },
+        onChunk: (delta) => {
+          setMessages(m => m.map(x => x.id === assistantId
+            ? { ...x, content: x.content + delta }
+            : x));
+        },
+      });
+    } catch (e) {
+      const msg = (e as Error).message ?? '请求失败';
+      setMessages(m => m.map(x => x.id === assistantId
+        ? { ...x, content: x.content || msg, error: true, pending: false }
+        : x));
+    } finally {
+      setMessages(m => m.map(x => x.id === assistantId
+        ? { ...x, pending: false }
+        : x));
+      setBusy(false);
+      abortRef.current = null;
     }
-    setMessages(m => [...m, { id: rid(), role: 'assistant', content: r.message.content }]);
   };
 
   const onSendForm = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     send();
-  };
-
-  const runSearch = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const q = searchQ.trim();
-    if (q.length < 2) {
-      setSearchErr('至少输入 2 个字符');
-      return;
-    }
-    setSearchErr(null);
-    setSearchBusy(true);
-    try {
-      const r = await api.get<SearchResp>('/api/search?q=' + encodeURIComponent(q));
-      // Filter by current scope, if a specific book is selected.
-      if (scope !== 'all') {
-        r.chunks = r.chunks.filter(h => h.bookId === scope);
-        r.notes = r.notes.filter(n => n.bookId === scope);
-      }
-      setSearchResults(r);
-    } catch (err) {
-      const e = err as ApiException;
-      setSearchErr(e.message ?? '搜索失败');
-    } finally {
-      setSearchBusy(false);
-    }
   };
 
   const usableBooks = useMemo(
@@ -147,177 +154,129 @@ export default function AIChatPage() {
 
   return (
     <DashboardChrome title="AI 对话">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Left column — chat */}
-        <section className="border border-paper-300/70 rounded-xl bg-paper-50 flex flex-col min-h-[60vh]">
-          <header className="px-4 py-3 border-b border-paper-300/60 flex flex-wrap items-center gap-2">
-            <label className="text-xs text-ink-500">范围：</label>
-            <select
-              value={scope}
-              onChange={e => setScope(e.target.value)}
-              className="rounded-lg border border-paper-300 px-2 py-1 text-sm bg-white"
-            >
-              <option value="all">全部书库</option>
-              {usableBooks.map(b => (
-                <option key={b.id} value={b.id}>《{truncate(b.title, 30)}》</option>
+      <section className="border border-paper-300/70 rounded-xl bg-paper-50 flex flex-col min-h-[70vh] max-w-3xl mx-auto">
+        <header className="px-4 py-3 border-b border-paper-300/60 flex flex-wrap items-center gap-2">
+          <label className="text-xs text-ink-500">范围：</label>
+          <select
+            value={scope}
+            onChange={e => setScope(e.target.value)}
+            className="rounded-lg border border-paper-300 px-2 py-1 text-sm bg-white"
+          >
+            <option value="all">全部书库</option>
+            {usableBooks.map(b => (
+              <option key={b.id} value={b.id}>《{truncate(b.title, 30)}》</option>
+            ))}
+          </select>
+          <label className="text-xs text-ink-500 ml-3">使用：</label>
+          <select
+            value={providerId}
+            onChange={e => setProviderId(e.target.value)}
+            className="rounded-lg border border-paper-300 px-2 py-1 text-sm bg-white"
+          >
+            <option value="">内置 AI</option>
+            {providers
+              .filter(p => p.enabled && p.hasKey)
+              .map(p => (
+                <option key={p.id} value={p.id}>{p.label}</option>
               ))}
-            </select>
-            <label className="text-xs text-ink-500 ml-3">使用：</label>
-            <select
-              value={providerId}
-              onChange={e => setProviderId(e.target.value)}
-              className="rounded-lg border border-paper-300 px-2 py-1 text-sm bg-white"
-            >
-              <option value="">内置 AI</option>
-              {providers
-                .filter(p => p.enabled && p.hasKey)
-                .map(p => (
-                  <option key={p.id} value={p.id}>{p.label}</option>
-                ))}
-            </select>
-            <button
-              onClick={() => setMessages([])}
-              disabled={messages.length === 0}
-              className="ml-auto text-xs text-ink-500 hover:text-ink-800 disabled:opacity-30"
-            >
-              清空对话
-            </button>
-          </header>
+          </select>
+          <button
+            onClick={() => setMessages([])}
+            disabled={messages.length === 0 || busy}
+            className="ml-auto text-xs text-ink-500 hover:text-ink-800 disabled:opacity-30"
+          >
+            清空对话
+          </button>
+        </header>
 
-          <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3">
-            {messages.length === 0 && (
-              <div className="text-sm py-12 text-center text-ink-500">
-                选择范围与模型后，开始你的提问。
-              </div>
-            )}
-            {messages.map(m => (
+        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4">
+          {messages.length === 0 && (
+            <div className="text-sm py-12 text-center text-ink-500">
+              选择范围与模型后，开始你的提问。
+              {scope !== 'all' && (
+                <div className="mt-2 text-xs">
+                  当前范围已限定到一本书；AI 回答时会从这本书检索相关段落。
+                </div>
+              )}
+            </div>
+          )}
+          {messages.map(m => (
+            <div key={m.id}>
               <div
-                key={m.id}
                 className={m.role === 'user' ? 'ai-bubble-user' : 'ai-bubble-asst'}
                 style={m.error ? { color: '#c93a3a' } : undefined}
               >
-                {m.content || (m.role === 'assistant' && busy ? '思考中…' : '')}
+                {m.content}
+                {m.pending && <span className="ai-cursor">▌</span>}
+                {m.role === 'assistant' && !m.pending && !m.content && '（暂无回复）'}
               </div>
-            ))}
-            {busy && messages[messages.length - 1]?.role === 'user' && (
-              <div className="ai-bubble-asst text-ink-500">思考中…</div>
-            )}
-          </div>
+              {m.role === 'assistant' && m.citations && m.citations.length > 0 && (
+                <CitationStrip citations={m.citations} />
+              )}
+            </div>
+          ))}
+        </div>
 
-          <form onSubmit={onSendForm} className="border-t border-paper-300/60 p-3 flex items-end gap-2">
-            <textarea
-              value={draft}
-              onChange={e => setDraft(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              rows={2}
-              placeholder="请提问… Shift+Enter 换行"
-              className="flex-1 resize-none rounded-lg border border-paper-300 px-3 py-2 text-sm outline-none focus:border-accent"
-            />
+        <form onSubmit={onSendForm} className="border-t border-paper-300/60 p-3 flex items-end gap-2">
+          <textarea
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            rows={2}
+            placeholder="请提问… Shift+Enter 换行"
+            className="flex-1 resize-none rounded-lg border border-paper-300 px-3 py-2 text-sm outline-none focus:border-accent"
+          />
+          {busy ? (
+            <button
+              type="button"
+              onClick={() => abortRef.current?.abort()}
+              className="px-4 py-2 rounded-lg border border-paper-300 text-ink-700 text-sm hover:bg-paper-100"
+            >
+              停止
+            </button>
+          ) : (
             <button
               type="submit"
-              disabled={busy || !draft.trim()}
+              disabled={!draft.trim()}
               className="px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium disabled:opacity-30 hover:bg-accent-dark"
             >
               发送
             </button>
-          </form>
-        </section>
-
-        {/* Right column — search */}
-        <section className="border border-paper-300/70 rounded-xl bg-paper-50 flex flex-col min-h-[60vh]">
-          <header className="px-4 py-3 border-b border-paper-300/60">
-            <form onSubmit={runSearch} className="flex items-center gap-2">
-              <input
-                type="search"
-                value={searchQ}
-                onChange={e => setSearchQ(e.target.value)}
-                placeholder={scope === 'all' ? '在全部书库搜索…' : '在当前书内搜索…'}
-                className="flex-1 rounded-lg border border-paper-300 px-3 py-1.5 text-sm outline-none focus:border-accent"
-              />
-              <button
-                type="submit"
-                disabled={searchBusy || searchQ.trim().length < 2}
-                className="px-3 py-1.5 rounded-lg bg-accent text-white text-sm disabled:opacity-30"
-              >
-                搜索
-              </button>
-              <button
-                type="button"
-                onClick={() => { setSearchQ(''); setSearchResults(null); setSearchErr(null); }}
-                disabled={!searchQ && !searchResults}
-                className="px-3 py-1.5 rounded-lg border border-paper-300 text-ink-700 text-sm hover:bg-paper-100 disabled:opacity-30"
-              >
-                清空
-              </button>
-            </form>
-          </header>
-
-          <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
-            {searchBusy && <div className="text-sm text-ink-500">搜索中…</div>}
-            {searchErr && <div className="text-sm text-rose-600">{searchErr}</div>}
-            {!searchResults && !searchBusy && !searchErr && (
-              <div className="text-sm text-ink-500 py-12 text-center">
-                输入关键词，从原文中检索内容；点击条目可跳到对应位置。
-              </div>
-            )}
-            {searchResults && (
-              <>
-                <h3 className="text-xs uppercase tracking-wide text-ink-500">书籍片段（{searchResults.chunks.length}）</h3>
-                {searchResults.chunks.length === 0 ? (
-                  <div className="text-sm text-ink-500">没有匹配的段落</div>
-                ) : (
-                  <ul className="space-y-2">
-                    {searchResults.chunks.slice(0, 20).map(h => (
-                      <li key={h.id}>
-                        <Link
-                          to={`/book/${h.bookId}`}
-                          className="block rounded-lg border border-paper-300/60 hover:border-accent/40 bg-white px-3 py-2"
-                        >
-                          <div className="text-[11px] text-ink-500 mb-1">
-                            《{h.bookTitle}》
-                            {h.chapterTitle && ' · ' + truncate(h.chapterTitle, 24)}
-                          </div>
-                          <div
-                            className="text-xs text-ink-700 leading-relaxed snippet-3-lines"
-                            dangerouslySetInnerHTML={{ __html: h.snippet }}
-                          />
-                        </Link>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {searchResults.notes.length > 0 && (
-                  <>
-                    <h3 className="text-xs uppercase tracking-wide text-ink-500 mt-4">笔记（{searchResults.notes.length}）</h3>
-                    <ul className="space-y-2">
-                      {searchResults.notes.slice(0, 10).map(n => (
-                        <li key={n.id}>
-                          <Link
-                            to={`/book/${n.bookId}`}
-                            className="block rounded-lg border border-paper-300/60 bg-white px-3 py-2"
-                          >
-                            <div className="text-[11px] text-ink-500 mb-1">《{n.bookTitle}》</div>
-                            <div
-                              className="text-xs text-ink-700 snippet-3-lines"
-                              dangerouslySetInnerHTML={{ __html: n.snippet }}
-                            />
-                          </Link>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </>
-            )}
-          </div>
-        </section>
-      </div>
+          )}
+        </form>
+      </section>
     </DashboardChrome>
+  );
+}
+
+function CitationStrip({ citations }: { citations: Citation[] }) {
+  return (
+    <div className="mt-2 ml-2 flex flex-wrap gap-2">
+      {citations.map(c => (
+        <Link
+          key={c.id}
+          to={c.chapterId
+            ? `/book/${c.bookId}?chapter=${encodeURIComponent(c.chapterId)}`
+            : `/book/${c.bookId}`}
+          className="block max-w-xs rounded-lg border border-paper-300/60 bg-white px-3 py-2 hover:border-accent/40"
+          title={`跳转到《${c.bookTitle}》${c.chapterTitle ? '· ' + c.chapterTitle : ''}`}
+        >
+          <div className="text-[11px] text-ink-500 mb-0.5">
+            《{truncate(c.bookTitle, 18)}》
+            {c.chapterTitle && ' · ' + truncate(c.chapterTitle, 16)}
+          </div>
+          <div
+            className="text-[11px] text-ink-700 leading-snug snippet-2-lines"
+            dangerouslySetInnerHTML={{ __html: c.snippet }}
+          />
+        </Link>
+      ))}
+    </div>
   );
 }
 

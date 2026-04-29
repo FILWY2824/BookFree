@@ -58,9 +58,13 @@ func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
 //  2. DELETE FROM books — the cascade rules drop book_assets / chunks
 //     / chapters / progress / highlights / notes in the same tx.
 //  3. Commit.
-//  4. Best-effort delete each storage key from the driver. If any of
-//     these fail we log them — the DB no longer references the file,
-//     so a periodic cleanup job (Phase 12) can sweep orphans later.
+//  4. Best-effort delete each storage key from the driver.
+//  5. DeletePrefix on `users/<uid>/books/<bid>/` to mop up any file we
+//     don't have a row for (covers, sidecar caches) plus the now-empty
+//     directory itself. Without step 5 the per-book directory shell
+//     was being left behind every time, accumulating fragmentation
+//     that would make a future data migration painful — the user
+//     called this out explicitly as a problem.
 //
 // We deliberately delete files AFTER the commit so that a tx rollback
 // (e.g. FK violation) doesn't take the user's files with it.
@@ -91,10 +95,12 @@ func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) dropStorageKeys(keys []string, userID, bookID string) {
-	if len(keys) == 0 {
-		return
-	}
 	ctx := context.Background()
+	// Pass 1: delete each tracked file. We still do this even though
+	// DeletePrefix would catch them, because (a) it makes per-key
+	// failures visible in the log and (b) drivers other than the
+	// local FS may not implement DeletePrefix as a single recursive
+	// call (e.g. an S3 driver might walk objects).
 	for _, k := range keys {
 		if err := h.Storage.Delete(ctx, k); err != nil {
 			logger.Warn("books.delete.storage", logger.Fields{
@@ -104,5 +110,17 @@ func (h *Handler) dropStorageKeys(keys []string, userID, bookID string) {
 				"err":    err.Error(),
 			})
 		}
+	}
+	// Pass 2: nuke the per-book directory so no shell is left behind.
+	// The local driver also prunes the now-empty `books/` parent if
+	// this was the user's last book.
+	prefix := storage.BookPrefix(userID, bookID)
+	if err := h.Storage.DeletePrefix(ctx, prefix); err != nil {
+		logger.Warn("books.delete.storage.prefix", logger.Fields{
+			"userId": userID,
+			"bookId": bookID,
+			"prefix": prefix,
+			"err":    err.Error(),
+		})
 	}
 }

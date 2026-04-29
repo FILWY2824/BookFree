@@ -133,13 +133,25 @@ function AISettings({ isAdmin }: { isAdmin: boolean }) {
           使用服务端预置的 AI。具体接口与模型不对外暴露。
         </div>
         {limits && (
-          <div className="text-xs text-ink-500 mb-3 space-x-3">
-            <span>当前状态：{limits.canUseSystem ? '可用' : '已暂停'}</span>
-            <span>本月已用：${limits.monthlyUsedUsd.toFixed(3)}</span>
-            <span>过去 1 分钟调用：{limits.ratePerMinuteUsed} 次</span>
-            {isAdmin && limits.monthlyCapUsd != null && (
-              <span>· 上限 ${limits.monthlyCapUsd.toFixed(2)} / {limits.ratePerMinuteCap}/分</span>
-            )}
+          <div className="space-y-2 mb-4">
+            <UsageBar
+              label="本月额度"
+              valueLabel={`$${limits.monthlyUsedUsd.toFixed(3)}${limits.monthlyCapUsd != null ? ` / $${limits.monthlyCapUsd.toFixed(2)}` : ''}`}
+              fraction={limits.monthlyCapUsd ? limits.monthlyUsedUsd / limits.monthlyCapUsd : 0}
+              warningAt={0.8}
+            />
+            <UsageBar
+              label="过去 1 分钟"
+              valueLabel={`${limits.ratePerMinuteUsed}${limits.ratePerMinuteCap != null ? ` / ${limits.ratePerMinuteCap}` : ''} 次`}
+              fraction={limits.ratePerMinuteCap ? limits.ratePerMinuteUsed / limits.ratePerMinuteCap : 0}
+              warningAt={0.8}
+            />
+            <div className="text-xs text-ink-500">
+              当前状态：
+              <span className={limits.canUseSystem ? 'text-emerald-700' : 'text-rose-600'}>
+                {limits.canUseSystem ? '可用' : '已暂停'}
+              </span>
+            </div>
           </div>
         )}
         <div className="flex items-center gap-2">
@@ -174,9 +186,35 @@ function AISettings({ isAdmin }: { isAdmin: boolean }) {
             ))}
           </ul>
         )}
-        <ProviderCreate onCreated={() => setReload(x => x + 1)} />
+        <ProviderCreateButton onCreated={() => setReload(x => x + 1)} />
       </Section>
     </>
+  );
+}
+
+// Compact horizontal usage bar. Goes amber > 60% and red > warningAt.
+function UsageBar({
+  label, valueLabel, fraction, warningAt = 0.8,
+}: {
+  label: string; valueLabel: string; fraction: number; warningAt?: number;
+}) {
+  const pct = Math.max(0, Math.min(1, fraction));
+  const danger = pct >= warningAt;
+  const warn = !danger && pct >= 0.6;
+  const color = danger ? '#dc2626' : warn ? '#d97706' : '#059669';
+  return (
+    <div>
+      <div className="flex items-baseline justify-between text-xs mb-1">
+        <span className="text-ink-600">{label}</span>
+        <span className="text-ink-500 tabular-nums">{valueLabel}</span>
+      </div>
+      <div className="h-2 rounded-full bg-paper-200 overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${(pct * 100).toFixed(1)}%`, background: color }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -386,13 +424,108 @@ function ProviderCard({ row, onChanged }: { row: ProviderRow; onChanged: () => v
   );
 }
 
-function ProviderCreate({ onCreated }: { onCreated: () => void }) {
+// Modal-based "add custom AI" flow.
+//
+// Why modal instead of inline form: the user reported that the inline
+// form felt out of place — they wanted "添加自定义 AI" to feel like a
+// distinct action with focus, not a panel that just expanded under
+// the list. The modal also gives us room for the "fetch models on
+// paste" UX without crowding the main page.
+//
+// Auto-fetch models:
+//   When BOTH baseUrl and apiKey are filled and have changed since
+//   the last fetch, we auto-call /api/ai/test in dry-run mode (the
+//   server lets us pass the URL+key inline rather than requiring a
+//   provider id) to list models. This way the user can pick the
+//   model name from a dropdown DURING creation, instead of creating
+//   a row first and clicking "拉取模型" afterwards.
+//
+// Failure transparency:
+//   If the dry-run test fails with HTTP 502 / 504 / etc. — i.e. the
+//   upstream returned an error rather than us refusing the URL —
+//   we now surface the constructed full URL (without the key) in
+//   the error message. Users were getting bare "✗ 502 Bad Gateway"
+//   responses with no idea what URL the server even tried; printing
+//   the URL closes the loop.
+function ProviderCreateButton({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="px-4 py-2 rounded-lg border border-dashed border-paper-300 text-ink-700 text-sm hover:bg-paper-100 w-full"
+      >
+        + 添加自定义 AI
+      </button>
+      {open && (
+        <ProviderCreateModal
+          onClose={() => setOpen(false)}
+          onCreated={() => { setOpen(false); onCreated(); }}
+        />
+      )}
+    </>
+  );
+}
+
+function ProviderCreateModal({
+  onClose, onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
   const [label, setLabel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [chatModel, setChatModel] = useState('');
+  const [models, setModels] = useState<string[] | null>(null);
+  const [probing, setProbing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Track which (baseUrl, apiKey) tuple we last probed so we don't
+  // re-fetch on every keystroke.
+  const lastProbedRef = useState({ baseUrl: '', apiKey: '' })[0];
+
+  // Debounce: probe 800ms after the user stops typing (and only if
+  // both fields are non-empty and the URL parses as https://...).
+  useEffect(() => {
+    const u = baseUrl.trim();
+    const k = apiKey.trim();
+    if (!u || !k) return;
+    if (lastProbedRef.baseUrl === u && lastProbedRef.apiKey === k) return;
+    if (!/^https?:\/\//i.test(u)) return;
+    const handle = setTimeout(async () => {
+      lastProbedRef.baseUrl = u;
+      lastProbedRef.apiKey = k;
+      setProbing(true);
+      setError(null);
+      try {
+        // Dry-run test: server accepts inline URL+key without persisting.
+        const r = await api.post<{
+          ok: boolean;
+          models?: string[];
+          errorMessage?: string;
+          attemptedUrl?: string;
+        }>('/api/ai/test', {
+          target: 'inline',
+          baseUrl: u,
+          apiKey: k,
+          listModels: true,
+        });
+        if (r.ok) {
+          setModels(r.models ?? []);
+          if (!chatModel && r.models && r.models[0]) setChatModel(r.models[0]);
+        } else {
+          const url = r.attemptedUrl ? `\n请求 URL: ${r.attemptedUrl}` : '';
+          setError((r.errorMessage ?? '探测失败') + url);
+        }
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setProbing(false);
+      }
+    }, 800);
+    return () => clearTimeout(handle);
+  }, [baseUrl, apiKey, chatModel, lastProbedRef]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -404,11 +537,8 @@ function ProviderCreate({ onCreated }: { onCreated: () => void }) {
         providerType: 'openai-compatible',
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
+        chatModel: chatModel.trim() || null,
       });
-      setLabel('');
-      setBaseUrl('');
-      setApiKey('');
-      setOpen(false);
       onCreated();
     } catch (err) {
       setError((err as Error).message ?? '创建失败');
@@ -417,80 +547,109 @@ function ProviderCreate({ onCreated }: { onCreated: () => void }) {
     }
   };
 
-  if (!open) {
-    return (
-      <button
-        onClick={() => setOpen(true)}
-        className="px-4 py-2 rounded-lg border border-dashed border-paper-300 text-ink-700 text-sm hover:bg-paper-100 w-full"
-      >
-        + 添加自定义 AI
-      </button>
-    );
-  }
-
   return (
-    <form onSubmit={submit} className="rounded-lg border border-paper-300/70 bg-paper-50 px-4 py-3 space-y-3">
-      <div>
-        <label className="text-xs text-ink-500 block mb-1">显示名称</label>
-        <input
-          required
-          maxLength={60}
-          value={label}
-          onChange={e => setLabel(e.target.value)}
-          placeholder="例如：DeepSeek"
-          className="w-full rounded-lg border border-paper-300 px-3 py-2 text-sm"
-        />
-      </div>
-      <div>
-        <label className="text-xs text-ink-500 block mb-1">Base URL</label>
-        <input
-          required
-          maxLength={2048}
-          type="url"
-          value={baseUrl}
-          onChange={e => setBaseUrl(e.target.value)}
-          placeholder="https://api.deepseek.com/v1"
-          className="w-full rounded-lg border border-paper-300 px-3 py-2 text-sm font-mono"
-        />
-        <div className="text-[11px] text-ink-500 mt-1">
-          仅支持 https:// 公网地址。不允许 localhost / 内网 IP / 含 ?查询 或 #片段。
-        </div>
-      </div>
-      <div>
-        <label className="text-xs text-ink-500 block mb-1">API Key</label>
-        <input
-          required
-          maxLength={1024}
-          type="password"
-          value={apiKey}
-          onChange={e => setApiKey(e.target.value)}
-          placeholder="sk-…"
-          className="w-full rounded-lg border border-paper-300 px-3 py-2 text-sm font-mono"
-        />
-        <div className="text-[11px] text-ink-500 mt-1">
-          密钥经服务端加密存储；仅在调用上游 API 时短暂解密。
-        </div>
-      </div>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ background: 'rgba(0,0,0,0.4)' }}
+      onClick={onClose}
+    >
+      <form
+        onSubmit={submit}
+        onClick={(e: React.MouseEvent) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-3"
+      >
+        <h3 className="text-lg font-medium text-ink-800 mb-2">添加自定义 AI</h3>
 
-      {error && <div className="text-sm text-rose-600">{error}</div>}
+        <div>
+          <label className="text-xs text-ink-500 block mb-1">显示名称</label>
+          <input
+            required
+            maxLength={60}
+            value={label}
+            onChange={e => setLabel(e.target.value)}
+            placeholder="例如：DeepSeek"
+            className="w-full rounded-lg border border-paper-300 px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-ink-500 block mb-1">Base URL</label>
+          <input
+            required
+            maxLength={2048}
+            type="url"
+            value={baseUrl}
+            onChange={e => setBaseUrl(e.target.value)}
+            placeholder="https://api.deepseek.com/v1"
+            className="w-full rounded-lg border border-paper-300 px-3 py-2 text-sm font-mono"
+          />
+          <div className="text-[11px] text-ink-500 mt-1">
+            仅支持 https:// 公网地址。不允许 localhost / 内网 IP / 含 ?查询 或 #片段。
+          </div>
+        </div>
+        <div>
+          <label className="text-xs text-ink-500 block mb-1">API Key</label>
+          <input
+            required
+            maxLength={1024}
+            type="password"
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder="sk-…"
+            className="w-full rounded-lg border border-paper-300 px-3 py-2 text-sm font-mono"
+          />
+          <div className="text-[11px] text-ink-500 mt-1">
+            密钥经服务端加密存储；仅在调用上游 API 时短暂解密。
+          </div>
+        </div>
 
-      <div className="flex items-center gap-2">
-        <button
-          type="submit"
-          disabled={busy}
-          className="px-4 py-2 rounded-lg bg-accent text-white text-sm disabled:opacity-30 hover:bg-accent-dark"
-        >
-          {busy ? '创建中…' : '创建'}
-        </button>
-        <button
-          type="button"
-          onClick={() => { setOpen(false); setError(null); }}
-          className="px-4 py-2 rounded-lg border border-paper-300 text-ink-700 text-sm hover:bg-paper-100"
-        >
-          取消
-        </button>
-      </div>
-    </form>
+        <div>
+          <label className="text-xs text-ink-500 block mb-1 flex items-center gap-2">
+            <span>模型</span>
+            {probing && <span className="text-ink-400">（正在探测可用模型…）</span>}
+          </label>
+          {models && models.length > 0 ? (
+            <select
+              value={chatModel}
+              onChange={e => setChatModel(e.target.value)}
+              className="w-full rounded-lg border border-paper-300 px-3 py-2 text-sm"
+            >
+              <option value="">（不指定，由上游决定）</option>
+              {models.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          ) : (
+            <input
+              value={chatModel}
+              onChange={e => setChatModel(e.target.value)}
+              placeholder="填写 URL 与 Key 后将自动探测可选模型"
+              className="w-full rounded-lg border border-paper-300 px-3 py-2 text-sm font-mono"
+            />
+          )}
+        </div>
+
+        {error && (
+          <div className="text-xs text-rose-600 whitespace-pre-wrap rounded-md bg-rose-50 px-3 py-2">
+            {error}
+          </div>
+        )}
+
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 rounded-lg border border-paper-300 text-ink-700 text-sm hover:bg-paper-100"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-4 py-2 rounded-lg bg-accent text-white text-sm disabled:opacity-30 hover:bg-accent-dark"
+          >
+            {busy ? '创建中…' : '创建'}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 

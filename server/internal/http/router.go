@@ -92,6 +92,19 @@ func New(deps RouterDeps) http.Handler {
 	mux.Handle("POST /api/auth/register", registerLimit(http.HandlerFunc(ah.HandleRegister)))
 	mux.HandleFunc("GET /api/auth/me", ah.HandleMe)
 
+	// Account self-delete — DELETE /api/auth/me. Requires the user's
+	// password in the request body. Routes through the accounts pkg
+	// to ensure DB rows AND on-disk files are wiped (covering the
+	// "fragments left behind" issue we hit on book deletion).
+	accountH := &auth.AccountHandler{
+		DB:       deps.DB,
+		Sessions: deps.Sessions,
+		Storage:  deps.Storage,
+		IsProd:   deps.IsProd,
+	}
+	mux.Handle("DELETE /api/auth/me",
+		auth.RequireUser(http.HandlerFunc(accountH.HandleDeleteSelf)))
+
 	// ── Books (require auth) ──────────────────────────────────────
 	bh := &books.Handler{
 		DB:          deps.DB,

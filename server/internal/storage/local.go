@@ -145,7 +145,75 @@ func (l *Local) Delete(ctx context.Context, key string) error {
 	if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// Walk parent dirs upwards from `full` toward `l.root` and remove
+	// any that are now empty. os.Remove is atomic-by-the-filesystem on
+	// directories: it only succeeds when empty. We walk by string
+	// truncation rather than calling readdir + check because the
+	// "empty?" check is racy and the OS already gives us the right
+	// semantics through os.Remove. Stop the moment we hit `l.root`,
+	// or any directory that isn't empty (the error will be ENOTEMPTY).
+	//
+	// Why this matters: book assets live under a per-book subdir; if
+	// we only delete the file, the now-empty `books/<bookID>/` shell
+	// stays on disk forever. Multiplied across hundreds of deletions
+	// it accumulates fragmentation that complicates a future data
+	// migration. The user explicitly called this out as a problem.
+	l.pruneEmptyParents(filepath.Dir(full))
 	return nil
+}
+
+// DeletePrefix removes the entire subtree rooted at the directory
+// implied by `prefix` (a logical key that ends in a slash). Both
+// files and empty directories are cleaned. Missing prefixes are not
+// errors.
+//
+// We accept and require a NON-EMPTY prefix; passing "" would resolve
+// to the storage root and recursively wipe every user's data, which
+// is never what we want. The caller's job is to construct the prefix
+// via storage.BookPrefix / storage.UserPrefix.
+func (l *Local) DeletePrefix(ctx context.Context, prefix string) error {
+	if prefix == "" {
+		return ErrInvalidKey
+	}
+	// resolve() rejects empty / "."/".." segments and traversal
+	// escapes; the same checks apply to a prefix. We strip the
+	// trailing slash because resolve treats keys segment-by-segment.
+	clean := strings.TrimRight(prefix, "/")
+	if clean == "" {
+		return ErrInvalidKey
+	}
+	full, err := l.resolve(clean)
+	if err != nil {
+		return err
+	}
+	// os.RemoveAll is exactly what we want — recursive delete that
+	// treats "doesn't exist" as success.
+	if err := os.RemoveAll(full); err != nil {
+		return err
+	}
+	l.pruneEmptyParents(filepath.Dir(full))
+	return nil
+}
+
+// pruneEmptyParents walks from `dir` toward the storage root and
+// removes any empty directory it finds. Stops at the first non-empty
+// directory (os.Remove returns ENOTEMPTY) or at the root itself.
+func (l *Local) pruneEmptyParents(dir string) {
+	for {
+		// Refuse to recurse past the storage root. filepath.Rel returns
+		// "." when `dir == l.root`, and a path starting with ".." when
+		// `dir` is outside it. Either way we stop.
+		rel, err := filepath.Rel(l.root, dir)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			return
+		}
+		if err := os.Remove(dir); err != nil {
+			// ENOTEMPTY (directory still has siblings) or any other
+			// error → we're done. Don't propagate; this is housekeeping.
+			return
+		}
+		dir = filepath.Dir(dir)
+	}
 }
 
 func (l *Local) Exists(ctx context.Context, key string) (bool, error) {

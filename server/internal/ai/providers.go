@@ -52,14 +52,14 @@ import (
 // ── DTOs ─────────────────────────────────────────────────────────────
 
 type providerDTO struct {
-	ID             string  `json:"id"`
-	Label          string  `json:"label"`
-	ProviderType   string  `json:"providerType"`
-	BaseURL        string  `json:"baseUrl"`
-	ChatModel      *string `json:"chatModel,omitempty"`
-	Enabled        bool    `json:"enabled"`
-	IsDefault      bool    `json:"isDefault"`
-	HasKey         bool    `json:"hasKey"`
+	ID           string  `json:"id"`
+	Label        string  `json:"label"`
+	ProviderType string  `json:"providerType"`
+	BaseURL      string  `json:"baseUrl"`
+	ChatModel    *string `json:"chatModel,omitempty"`
+	Enabled      bool    `json:"enabled"`
+	IsDefault    bool    `json:"isDefault"`
+	HasKey       bool    `json:"hasKey"`
 	// KeyHint is the last 4 chars of the original key, prefixed with
 	// "sk-…". Lets the user identify which key is in this profile
 	// without exposing it. Empty when no key stored.
@@ -358,11 +358,21 @@ func (h *Handler) HandleListProviderModels(w http.ResponseWriter, r *http.Reques
 		response.Fail(w, http.StatusNotFound, response.CodeNotFound, "未找到该 AI 配置")
 		return
 	}
-
-	req, err := NewSafeRequest(r.Context(), base, http.MethodGet, "/models", nil)
+	models, err := fetchOpenAIModels(r.Context(), base, apiKey)
 	if err != nil {
-		response.Fail(w, http.StatusBadRequest, response.CodeValidation, "URL 构造失败：" + err.Error())
+		response.Fail(w, http.StatusBadGateway, "AI_UPSTREAM", err.Error())
 		return
+	}
+	response.OK(w, map[string]any{"models": models})
+}
+
+// fetchOpenAIModels GETs /models on an OpenAI-compatible provider and
+// returns the IDs. Errors are user-safe (they can be surfaced verbatim
+// in the settings page without leaking internal details).
+func fetchOpenAIModels(ctx context.Context, base SafeBaseURL, apiKey string) ([]string, error) {
+	req, err := NewSafeRequest(ctx, base, http.MethodGet, "/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("URL 构造失败：%s", err.Error())
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
@@ -370,28 +380,22 @@ func (h *Handler) HandleListProviderModels(w http.ResponseWriter, r *http.Reques
 	client := SafeHTTPClient(15 * time.Second)
 	res, err := client.Do(req)
 	if err != nil {
-		response.Fail(w, http.StatusBadGateway, "AI_UPSTREAM",
-			"无法连接到 AI 服务："+sanitizeNetworkErr(err))
-		return
+		return nil, fmt.Errorf("无法连接到 AI 服务：%s", sanitizeNetworkErr(err))
 	}
 	defer res.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 256<<10))
 	if res.StatusCode/100 != 2 {
-		response.Fail(w, http.StatusBadGateway, "AI_UPSTREAM",
-			fmt.Sprintf("拉取模型失败（HTTP %d）：%s", res.StatusCode, extractErrorMessage(body)))
-		return
+		return nil, fmt.Errorf("拉取模型失败（HTTP %d）：%s", res.StatusCode, extractErrorMessage(body))
 	}
 
-	// OpenAI-compatible shape: {"data": [{"id": "..."}]}.
 	var parsed struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		response.Fail(w, http.StatusBadGateway, "AI_UPSTREAM", "上游返回无法解析为模型列表")
-		return
+		return nil, fmt.Errorf("上游返回无法解析为模型列表")
 	}
 	models := make([]string, 0, len(parsed.Data))
 	for _, m := range parsed.Data {
@@ -399,15 +403,22 @@ func (h *Handler) HandleListProviderModels(w http.ResponseWriter, r *http.Reques
 			models = append(models, m.ID)
 		}
 	}
-	response.OK(w, map[string]any{"models": models})
+	return models, nil
 }
 
 // ── Test ─────────────────────────────────────────────────────────────
 
 type testRequest struct {
-	// "builtin" or "provider"
+	// "builtin", "provider", or "inline"
 	Target     string `json:"target"`
 	ProviderID string `json:"providerId,omitempty"`
+	// Inline-only: try the supplied URL+key without persisting them.
+	// Used by the "Add custom AI" modal during creation, both to
+	// validate that the credentials work and to populate the model
+	// dropdown before the user commits.
+	BaseURL    string `json:"baseUrl,omitempty"`
+	APIKey     string `json:"apiKey,omitempty"`
+	ListModels bool   `json:"listModels,omitempty"`
 }
 
 func (h *Handler) HandleTest(w http.ResponseWriter, r *http.Request) {
@@ -441,6 +452,56 @@ func (h *Handler) HandleTest(w http.ResponseWriter, r *http.Request) {
 			response.OK(w, map[string]any{"ok": false, "errorMessage": sanitizeBuiltinErr(msg)})
 		}
 
+	case "inline":
+		// Inline test for the "Add custom AI" creation modal. Validates
+		// the URL via the same SSRF guard used for stored providers
+		// (so the same restrictions apply: https only, public IPs only,
+		// port allow-list, etc.). On any failure we ALSO return the
+		// constructed full URL so the user can see exactly what we
+		// tried — addressing the "got 502 with no context" complaint.
+		if strings.TrimSpace(body.BaseURL) == "" || strings.TrimSpace(body.APIKey) == "" {
+			response.Fail(w, http.StatusBadRequest, response.CodeValidation, "缺少 baseUrl 或 apiKey")
+			return
+		}
+		base, err := ValidateBaseURL(body.BaseURL)
+		if err != nil {
+			response.OK(w, map[string]any{
+				"ok":           false,
+				"errorMessage": "URL 校验失败：" + err.Error(),
+			})
+			return
+		}
+		if body.ListModels {
+			models, fetchErr := fetchOpenAIModels(r.Context(), base, body.APIKey)
+			if fetchErr == nil {
+				response.OK(w, map[string]any{
+					"ok":     true,
+					"models": models,
+				})
+				return
+			}
+			response.OK(w, map[string]any{
+				"ok":           false,
+				"errorMessage": fetchErr.Error(),
+				"attemptedUrl": base.String() + "/models",
+			})
+			return
+		}
+		ok2, name, modelOut, errMsg := pingOpenAICompatible(r.Context(), base, body.APIKey, "")
+		if ok2 {
+			response.OK(w, map[string]any{
+				"ok":    true,
+				"name":  pickNonEmpty(name, "自定义 AI"),
+				"model": modelOut,
+			})
+		} else {
+			response.OK(w, map[string]any{
+				"ok":           false,
+				"errorMessage": errMsg,
+				"attemptedUrl": base.String() + "/chat/completions",
+			})
+		}
+
 	case "provider":
 		if body.ProviderID == "" {
 			response.Fail(w, http.StatusBadRequest, response.CodeValidation, "缺少 providerId")
@@ -460,14 +521,15 @@ func (h *Handler) HandleTest(w http.ResponseWriter, r *http.Request) {
 		ok2, name, modelOut, errMsg := pingOpenAICompatible(r.Context(), base, apiKey, model.String)
 		if ok2 {
 			response.OK(w, map[string]any{
-				"ok":       true,
-				"name":     pickNonEmpty(name, label.String, "自定义 AI"),
-				"model":    modelOut,
+				"ok":    true,
+				"name":  pickNonEmpty(name, label.String, "自定义 AI"),
+				"model": modelOut,
 			})
 		} else {
 			response.OK(w, map[string]any{
 				"ok":           false,
 				"errorMessage": errMsg,
+				"attemptedUrl": base.String() + "/chat/completions",
 			})
 		}
 	default:

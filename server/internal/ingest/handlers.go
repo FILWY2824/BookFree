@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"bookfree/internal/ai"
 	"bookfree/internal/auth"
 	"bookfree/internal/response"
 	"bookfree/internal/search"
@@ -194,6 +195,13 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 	// FTS5 trigger picks up the row immediately. The bigram tokenizer
 	// is the same one the search handler uses, so the index is
 	// consistent with the query path.
+	//
+	// We also write a 96-d hash-vector embedding per chunk into
+	// book_chunk_embeddings (migration 0023). The cost is tiny —
+	// ~384 bytes per chunk, ~400 KB for a typical book — and lets
+	// the streaming-chat endpoint do hybrid (FTS + cosine) ranking
+	// without an external embedding service. See ai/rag.go for the
+	// full retrieval pipeline; this insert is the only producer.
 	if len(body.Chunks) > 0 {
 		stmt, err := tx.PrepareContext(r.Context(), `
 			INSERT INTO book_chunks (id, book_id, user_id, chapter_id, chapter_ord, page_no, ord, text, search_text, created_at)
@@ -201,6 +209,19 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		`)
 		if err != nil {
 			response.FailSafe(w, "ingest.prepare_chunk", err, http.StatusInternalServerError, h.IsProd)
+			return
+		}
+		embStmt, err := tx.PrepareContext(r.Context(), `
+			INSERT INTO book_chunk_embeddings (chunk_id, book_id, user_id, model_tag, vector, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(chunk_id) DO UPDATE SET
+				vector     = excluded.vector,
+				model_tag  = excluded.model_tag,
+				created_at = excluded.created_at
+		`)
+		if err != nil {
+			stmt.Close()
+			response.FailSafe(w, "ingest.prepare_embedding", err, http.StatusInternalServerError, h.IsProd)
 			return
 		}
 		for _, c := range body.Chunks {
@@ -220,11 +241,21 @@ func (h *Handler) HandlePost(w http.ResponseWriter, r *http.Request) {
 				chapterID, nullIntPtr(c.ChapterOrd), nullIntPtr(c.PageNo),
 				c.Ord, c.Text, searchText, now); err != nil {
 				stmt.Close()
+				embStmt.Close()
 				response.FailSafe(w, "ingest.insert_chunk", err, http.StatusInternalServerError, h.IsProd)
 				return
 			}
+			vec := ai.EncodeVector(ai.EmbedText(c.Text))
+			if _, err := embStmt.ExecContext(r.Context(),
+				dbID, bookID, user.ID, ai.EmbedModelTag(), vec, now); err != nil {
+				// Embedding insert is non-critical — log and continue.
+				// A missing row downgrades retrieval to FTS-only for
+				// this chunk, which is still useful.
+				_ = err
+			}
 		}
 		stmt.Close()
+		embStmt.Close()
 	}
 
 	// Update book metadata + status.

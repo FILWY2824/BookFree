@@ -45,6 +45,64 @@ export default function PageNav({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Click handler installed on the OUTER container. We let the user
+  // select text without interference (the .page-zone overlays now have
+  // pointer-events:none), and check on click whether they actually
+  // intended a page flip — i.e. they clicked, didn't drag, and there's
+  // no live selection.
+  useEffect(() => {
+    if (!enabled || !interactiveZones) return;
+    const el = containerRef.current;
+    if (!el) return;
+
+    let downX = 0;
+    let downY = 0;
+    let downAt = 0;
+
+    const onDown = (e: MouseEvent) => {
+      // Only left button.
+      if (e.button !== 0) return;
+      downX = e.clientX;
+      downY = e.clientY;
+      downAt = performance.now();
+    };
+    const onClick = (e: MouseEvent) => {
+      // Skip if focus / target is inside an interactive control.
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      // If the click landed on the prev/next pill or any other
+      // explicit button, let that handler win — don't double-flip.
+      if (t.closest('button, a, input, textarea, select, [data-hl-id], .selection-toolbar, .note-editor')) {
+        return;
+      }
+      // No drag (movement < 6px) and no live selection.
+      const dx = Math.abs(e.clientX - downX);
+      const dy = Math.abs(e.clientY - downY);
+      if (dx > 6 || dy > 6) return;
+      const dt = performance.now() - downAt;
+      if (dt > 600) return;
+      const sel = window.getSelection();
+      if (sel && sel.toString().trim().length > 0) return;
+
+      const rect = el.getBoundingClientRect();
+      const xRel = e.clientX - rect.left;
+      const w = rect.width;
+      if (xRel < w / 3) {
+        if (canPrev) onPrev();
+      } else if (xRel > (w * 2) / 3) {
+        if (canNext) onNext();
+      }
+      // Middle third: do nothing, leave for selection / context menu.
+    };
+
+    el.addEventListener('mousedown', onDown);
+    el.addEventListener('click', onClick);
+    return () => {
+      el.removeEventListener('mousedown', onDown);
+      el.removeEventListener('click', onClick);
+    };
+  }, [enabled, interactiveZones, onPrev, onNext, canPrev, canNext]);
+
   // Wheel handler — translate scroll to page flips. Each "gesture"
   // (a contiguous burst of wheel events with no >250 ms gap) flips
   // exactly one page, no matter how much delta the user accumulates
@@ -94,20 +152,11 @@ export default function PageNav({
 
       {enabled && interactiveZones && (
         <>
-          <button
-            type="button"
-            className="page-zone page-zone-left"
-            aria-label="上一页（点击左侧）"
-            tabIndex={-1}
-            onClick={() => canPrev && onPrev()}
-          />
-          <button
-            type="button"
-            className="page-zone page-zone-right"
-            aria-label="下一页（点击右侧）"
-            tabIndex={-1}
-            onClick={() => canNext && onNext()}
-          />
+          {/* Visual hint zones — kept as decorative overlays only.
+              Pointer-events disabled in CSS so text selection works
+              everywhere; the parent click handler decides flips. */}
+          <div className="page-zone page-zone-left" aria-hidden="true" />
+          <div className="page-zone page-zone-right" aria-hidden="true" />
         </>
       )}
 
