@@ -173,12 +173,19 @@ export interface ReaderPrefs {
   pageMode: PageMode;
   /** Per-style memory of the last colour the user picked. Used to
    *  seed the SelectionToolbar when the user creates a NEW annotation
-   *  of the given style. Existing annotations are not affected. */
+   *  of the given style. Existing annotations are not affected.
+   *
+   *  `note` is the colour used when the user attaches a note from a
+   *  fresh selection — the underlying highlight gets this colour
+   *  rather than reusing the highlight pref, so users can
+   *  visually distinguish "marked passages" from "marked passages
+   *  with my own commentary attached" at a glance. */
   styleColors: {
     highlight: 'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
     underline: 'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
     wavy:      'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
     strike:    'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
+    note:      'yellow' | 'red' | 'green' | 'blue' | 'purple' | 'orange';
   };
   /** AI assistant panel pinned as a floating card. When pinned the
    *  panel doesn't take a backdrop and stays visible while the user
@@ -199,6 +206,7 @@ export const DEFAULT_PREFS: ReaderPrefs = {
     underline: 'blue',
     wavy:      'red',
     strike:    'purple',
+    note:      'green',
   },
   aiPinned: false,
 };
@@ -342,6 +350,7 @@ function parseStyleColors(raw: unknown): ReaderPrefs['styleColors'] {
     underline: pick('underline'),
     wavy:      pick('wavy'),
     strike:    pick('strike'),
+    note:      pick('note'),
   };
 }
 

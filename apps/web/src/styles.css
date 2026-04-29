@@ -44,9 +44,23 @@ body {
 }
 
 .reader-prose {
-  font-family: theme('fontFamily.serif');
+  /* The font-family is intentionally NOT declared here so that the
+     reader component can drive it inline (from prefs.fontFamily) without
+     fighting CSS specificity. Earlier we set it to theme('fontFamily.serif')
+     here, which silently won against inline styles applied to a parent
+     wrapper, so the font-picker in 阅读设置 had no visible effect. The
+     prose now inherits font-family from its rendering wrapper, which the
+     reader sets explicitly. Same reasoning for .reader-paginated below. */
   line-height: 1.85;
   color: var(--reader-fg);
+  /* Better text rendering for CJK + mixed scripts: use kerning where
+     available and prevent font-feature mismatches that produced the
+     "characters look spaced apart" effect the user reported. */
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: 0;
+  word-spacing: 0;
 }
 .reader-prose p { margin: 1em 0; }
 .reader-prose h1, .reader-prose h2, .reader-prose h3 {
@@ -96,8 +110,14 @@ body {
    columns wider than the viewport.
    ───────────────────────────────────────────────────────────────── */
 .reader-paginated {
-  font-family: theme('fontFamily.serif');
+  /* See note on .reader-prose above — font-family is NOT declared here
+     so the inline style on the page wrapper actually wins. */
   color: var(--reader-fg);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: 0;
+  word-spacing: 0;
 }
 .reader-paginated p { margin: 1em 0; }
 .reader-paginated h1, .reader-paginated h2, .reader-paginated h3 {
@@ -756,4 +776,495 @@ mark.search-flash {
 [data-reader-theme="slate"]  .header-color-swatch,
 [data-reader-theme="dark"]   .header-color-swatch {
   border-color: rgba(255, 255, 255, 0.25);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Reader header layout — redesigned to separate book title from
+   chapter title.
+
+   Visual stack:
+     [back] [TOC label]                               [actions]
+                       ── book title (bold, centered) ──
+                       ── chapter title (small, muted) ──
+
+   The two-line centred title sits on a flexible middle column so
+   long titles truncate gracefully. The action cluster on the right
+   holds annotation pickers + AI + settings buttons.
+
+   The whole bar is a touch taller (3.25rem) than the previous
+   single-line h-12 to give the two-line title room to breathe.
+   ───────────────────────────────────────────────────────────────── */
+.reader-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 56px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--reader-border);
+  color: var(--reader-fg);
+  background: var(--reader-bg);
+  flex-shrink: 0;
+  position: relative;
+}
+.reader-header-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1.2;
+  overflow: hidden;
+  padding: 0 8px;
+}
+.reader-header-book {
+  font-family: ui-serif, Georgia, "Songti SC", "SimSun", serif;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--reader-fg);
+}
+.reader-header-chapter {
+  font-size: 11px;
+  color: var(--reader-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+  letter-spacing: 0.04em;
+}
+.reader-header-icon-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--reader-fg);
+  opacity: 0.72;
+  transition: opacity 120ms ease, background 120ms ease;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.reader-header-icon-btn:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.05);
+}
+[data-reader-theme="forest"] .reader-header-icon-btn:hover,
+[data-reader-theme="slate"]  .reader-header-icon-btn:hover,
+[data-reader-theme="dark"]   .reader-header-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* The annotation-style cluster — four small action chips per style
+   that open a colour picker popover when clicked. Sits in the right
+   side of the header before the AI / settings icons. */
+.reader-style-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+}
+.reader-style-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px 0 6px;
+  border-radius: 13px;
+  border: 1px solid var(--reader-border);
+  background: transparent;
+  color: var(--reader-fg);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, transform 120ms ease;
+  white-space: nowrap;
+  position: relative;
+}
+.reader-style-chip:hover { background: rgba(0, 0, 0, 0.05); }
+.reader-style-chip[aria-expanded="true"] {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: var(--reader-fg);
+}
+[data-reader-theme="forest"] .reader-style-chip:hover,
+[data-reader-theme="slate"]  .reader-style-chip:hover,
+[data-reader-theme="dark"]   .reader-style-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.reader-style-chip-label { font-weight: 500; opacity: 0.95; }
+.reader-style-chip-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(0, 0, 0, 0.18);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55) inset;
+}
+[data-reader-theme="forest"] .reader-style-chip-dot,
+[data-reader-theme="slate"]  .reader-style-chip-dot,
+[data-reader-theme="dark"]   .reader-style-chip-dot {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+/* Color picker popover — used both by header chips (to set a default
+   colour for a style) and for any other "pick one of six colours" UI
+   we add later. Position is computed by the caller; we just style. */
+.color-popover {
+  position: absolute;
+  z-index: 35;
+  background: var(--reader-bg);
+  border: 1px solid var(--reader-border);
+  border-radius: 12px;
+  padding: 8px;
+  box-shadow: 0 12px 28px -8px rgba(0, 0, 0, 0.32);
+  display: grid;
+  grid-template-columns: repeat(6, 24px);
+  gap: 6px;
+  animation: selection-pop 140ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.color-popover-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+[data-reader-theme="forest"] .color-popover-swatch,
+[data-reader-theme="slate"]  .color-popover-swatch,
+[data-reader-theme="dark"]   .color-popover-swatch {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.color-popover-swatch:hover { transform: scale(1.12); }
+.color-popover-swatch[data-active="1"] {
+  box-shadow: 0 0 0 2px var(--reader-bg), 0 0 0 4px var(--reader-fg);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Reading-progress bar.
+
+   Sits between the header bar and the reader's content surface as a
+   1px hairline that fills from the left as the user reads. Designed
+   to be virtually invisible at idle (a pale border-coloured track)
+   but readable at a glance when the user looks for it.
+   ───────────────────────────────────────────────────────────────── */
+.reader-progress {
+  position: relative;
+  height: 2px;
+  background: rgba(0, 0, 0, 0.04);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+[data-reader-theme="forest"] .reader-progress,
+[data-reader-theme="slate"]  .reader-progress,
+[data-reader-theme="dark"]   .reader-progress {
+  background: rgba(255, 255, 255, 0.05);
+}
+.reader-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--reader-accent);
+  opacity: 0.78;
+  transition: width 280ms ease-out;
+  /* Subtle leading edge so the user perceives "this is moving" even
+     when the progress jump is small. */
+  box-shadow: 0 0 6px 0 var(--reader-accent);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Mini selection toolbar — replaces the older multi-row picker.
+
+   When the user selects text, we show a compact pill-shaped row of
+   action buttons. Each button applies the matching annotation style
+   immediately, using the colour the user has set in the header
+   for that style. No 复制 button — Cmd/Ctrl+C handles that case
+   without taking up panel real estate.
+   ───────────────────────────────────────────────────────────────── */
+.mini-toolbar {
+  position: absolute;
+  z-index: 30;
+  display: inline-flex;
+  align-items: stretch;
+  background: var(--reader-bg);
+  border: 1px solid var(--reader-border);
+  border-radius: 999px;
+  padding: 4px;
+  gap: 2px;
+  box-shadow: 0 10px 26px -10px rgba(0, 0, 0, 0.35);
+  color: var(--reader-fg);
+  animation: selection-pop 140ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  user-select: none;
+}
+.mini-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 11px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--reader-fg);
+  cursor: pointer;
+  transition: background 120ms ease;
+  white-space: nowrap;
+}
+.mini-toolbar-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+[data-reader-theme="forest"] .mini-toolbar-btn:hover,
+[data-reader-theme="slate"]  .mini-toolbar-btn:hover,
+[data-reader-theme="dark"]   .mini-toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.10);
+}
+.mini-toolbar-btn-danger { color: #c93a3a; }
+.mini-toolbar-btn .swatch-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.2px solid rgba(0, 0, 0, 0.18);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   AI panel — wider layout with a history sidebar inside the drawer.
+
+   Layout is two columns:
+     [history]  [conversation]
+        96px        rest
+
+   The history pane is a scrollable list of past conversations for
+   this book. Tapping one swaps it into the conversation pane.
+   ───────────────────────────────────────────────────────────────── */
+.ai-panel-grid {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+@media (max-width: 720px) {
+  .ai-panel-grid {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+}
+.ai-history {
+  border-right: 1px solid var(--reader-border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ai-history-header {
+  padding: 10px 10px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-bottom: 1px solid var(--reader-border);
+}
+.ai-history-title {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--reader-muted);
+  text-transform: uppercase;
+}
+.ai-history-new {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--reader-fg);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  border: 0;
+  opacity: 0.7;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.ai-history-new:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.06);
+}
+.ai-history-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ai-history-empty {
+  font-size: 11px;
+  color: var(--reader-muted);
+  padding: 8px 6px;
+  line-height: 1.5;
+  text-align: center;
+}
+.ai-history-item {
+  display: flex;
+  align-items: stretch;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  transition: background 120ms ease;
+  border: 0;
+  padding: 0;
+  text-align: left;
+}
+.ai-history-item:hover { background: rgba(0, 0, 0, 0.045); }
+.ai-history-item[data-active="1"] {
+  background: rgba(124, 90, 58, 0.10);
+}
+[data-reader-theme="forest"] .ai-history-item:hover,
+[data-reader-theme="slate"]  .ai-history-item:hover,
+[data-reader-theme="dark"]   .ai-history-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.ai-history-item-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ai-history-item-title {
+  font-size: 12px;
+  color: var(--reader-fg);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-history-item-time {
+  font-size: 10px;
+  color: var(--reader-muted);
+}
+.ai-history-item-del {
+  flex: 0 0 auto;
+  width: 22px;
+  background: transparent;
+  border: 0;
+  color: var(--reader-muted);
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.ai-history-item:hover .ai-history-item-del { opacity: 0.85; }
+.ai-history-item-del:hover { color: #c93a3a; opacity: 1; }
+
+.ai-panel-conversation {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Provider picker row inside the AI panel header. */
+.ai-provider-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 8px;
+  border-bottom: 1px solid var(--reader-border);
+  font-size: 11px;
+  color: var(--reader-muted);
+}
+.ai-provider-row select {
+  background: transparent;
+  color: var(--reader-fg);
+  border: 1px solid var(--reader-border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ai-provider-row select option {
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+}
+
+/* Markdown-rendered assistant bubble. We re-use ai-bubble-asst as the
+   container and add this descendant ruleset for prose tokens. We
+   purposefully don't add background or padding here — the parent
+   bubble already does both — and we keep heading sizes modest so an
+   accidental # at the start of a paragraph doesn't blow up the layout. */
+.ai-md > *:first-child { margin-top: 0; }
+.ai-md > *:last-child  { margin-bottom: 0; }
+.ai-md p   { margin: 0.45em 0; }
+.ai-md h1  { font-size: 1.05em; font-weight: 600; margin: 0.55em 0 0.3em; }
+.ai-md h2  { font-size: 1.02em; font-weight: 600; margin: 0.55em 0 0.3em; }
+.ai-md h3,
+.ai-md h4,
+.ai-md h5,
+.ai-md h6 { font-size: 1em;    font-weight: 600; margin: 0.5em 0 0.25em; }
+.ai-md ul,
+.ai-md ol  { margin: 0.4em 0; padding-left: 1.4em; }
+.ai-md li  { margin: 0.18em 0; }
+.ai-md a   { color: var(--reader-accent); text-decoration: underline; text-underline-offset: 2px; }
+.ai-md code {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0.05em 0.35em;
+  border-radius: 4px;
+  font-size: 0.92em;
+  font-family: "Sarasa Mono SC", ui-monospace, "JetBrains Mono", "Menlo", monospace;
+}
+[data-reader-theme="forest"] .ai-md code,
+[data-reader-theme="slate"]  .ai-md code,
+[data-reader-theme="dark"]   .ai-md code {
+  background: rgba(255, 255, 255, 0.10);
+}
+.ai-md pre {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0.6em 0.8em;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+  font-size: 0.88em;
+}
+[data-reader-theme="forest"] .ai-md pre,
+[data-reader-theme="slate"]  .ai-md pre,
+[data-reader-theme="dark"]   .ai-md pre {
+  background: rgba(255, 255, 255, 0.08);
+}
+.ai-md pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+.ai-md blockquote {
+  border-left: 3px solid var(--reader-border);
+  padding-left: 0.7em;
+  margin: 0.5em 0;
+  color: var(--reader-muted);
+}
+.ai-md hr {
+  border: 0;
+  border-top: 1px solid var(--reader-border);
+  margin: 0.7em 0;
+}
+.ai-md strong { font-weight: 600; }
+.ai-md em     { font-style: italic; }
+.ai-md s      { color: var(--reader-muted); }
+
+/* ─────────────────────────────────────────────────────────────────
+   Pin a TOC drawer width that's responsive to narrow viewports —
+   the dock is always visible per spec, but a 288px-wide dock kills
+   reading area on phones. At <720 px we collapse it to 200px.
+   ───────────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .reader-toc-dock {
+    width: 200px !important;
+  }
 }

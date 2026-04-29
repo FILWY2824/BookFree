@@ -13,12 +13,12 @@
 //
 // Behaviours we now expose:
 //
-//   • TOC dock — permanently rendered next to the reader column
-//     (visibility toggleable from the header). The dock has its own
-//     fixed header bar with a "定位到当前章节" button that scrolls
-//     the dock to the active TOC entry; we no longer support a
-//     `tocPinned` pref because that was a second source of truth that
-//     drifted from `tocVisible`.
+//   • TOC dock — permanently rendered next to the reader column.
+//     Per the user's "目录不允许收起来" feedback, there is no
+//     visibility toggle anymore: the dock is always visible (PDF
+//     books are the one exception, since they have no chapter list).
+//     The dock has its own fixed header bar with a "定位到当前章节"
+//     button that scrolls the dock to the active TOC entry.
 //
 //   • Active TOC chapter is computed from the reader's emitted
 //     `activeChapterId`, so the dock highlight tracks the page-flip
@@ -102,14 +102,18 @@ export default function ReaderPage() {
    *  the TOC's highlighted entry. */
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
 
-  // Dock + panels.
-  const [tocVisible, setTocVisible] = useState(true);
+  // Dock + panels. The TOC dock is always rendered now (per user
+  // request "目录不允许收起来"), so there's no `tocVisible` state.
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   /** When toggled, the TOC drawer scrolls to the active entry. We
    *  pass this counter down rather than a callback so the drawer
    *  can manage the scroll mechanics itself. */
   const [tocLocateTick, setTocLocateTick] = useState(0);
+
+  /** 0..1 reading-progress estimate emitted by the reader. Drives the
+   *  hairline progress bar between the header and the content area. */
+  const [progressPct, setProgressPct] = useState(0);
 
   const [bookReady, setBookReady] = useState(false);
   const [readerBusy, setReaderBusy] = useState(false);
@@ -273,17 +277,18 @@ export default function ReaderPage() {
     [book, prefs.pageMode],
   );
 
-  const headerTitle = useMemo(() => {
+  // We surface book title and chapter title separately now (per the
+  // user's "书名与章节需要分开" feedback). The chapter falls back to
+  // the active-chapter id reported by the reader so it tracks
+  // page-flip in real time; the book title comes straight from the
+  // book row.
+  const chapterTitle = useMemo(() => {
     if (!book) return '';
-    if (isPDF) return book.title;
-    // Prefer the active-chapter id reported by the reader; fall back
-    // to chapters[chapterOrd]. This matches the TOC drawer's active
-    // entry so the title bar and the dock highlight are always
-    // consistent — fixing the "header shows wrong chapter" bug.
+    if (isPDF) return '';
     const active = activeChapterId
       ? chapters.find(c => c.id === activeChapterId)
       : chapters[chapterOrd];
-    return active?.title || book.title;
+    return active?.title?.trim() || '';
   }, [book, chapters, chapterOrd, activeChapterId, isPDF]);
 
   // ── Handlers passed to readers ─────────────────────────────────
@@ -296,6 +301,7 @@ export default function ReaderPage() {
   const handleActiveChapterChange = useCallback((cid: string) => {
     setActiveChapterId(cid);
   }, []);
+  const handleProgressPercent = useCallback((p: number) => setProgressPct(p), []);
 
   // Resolve a TOC pick (which is a chapterId) into a spine ord.
   const handleTocPick = useCallback((chapterId: string) => {
@@ -310,8 +316,8 @@ export default function ReaderPage() {
     setTimeout(() => forceRender(t => t + 1), 620);
   }, []);
 
-  // Per-style colour change from the header swatch row.
-  const handleStyleColorChange = useCallback((style: HighlightStyle, color: HighlightColor) => {
+  // Per-style colour change from the header chip popover.
+  const handleStyleColorChange = useCallback((style: HighlightStyle | 'note', color: HighlightColor) => {
     setPrefs(p => ({
       ...p,
       styleColors: { ...p.styleColors, [style]: color },
@@ -353,9 +359,8 @@ export default function ReaderPage() {
       style={{ background: 'var(--reader-bg)' }}
     >
       <ReaderHeader
-        title={headerTitle}
         bookTitle={book.title}
-        onTOC={() => setTocVisible(v => !v)}
+        chapterTitle={chapterTitle}
         onSettings={() => setSettingsOpen(true)}
         onAI={() => setAiOpen(true)}
         onBack={() => navigate('/library')}
@@ -363,8 +368,18 @@ export default function ReaderPage() {
         onStyleColorChange={handleStyleColorChange}
       />
 
+      {/* Hairline progress bar — sits in the seam between the header
+          and the reader column. We render zero width when the bar is
+          empty so the leading-edge glow doesn't draw at idle. */}
+      <div className="reader-progress" aria-hidden="true">
+        <div
+          className="reader-progress-fill"
+          style={{ width: `${(Math.max(0, Math.min(1, progressPct)) * 100).toFixed(2)}%` }}
+        />
+      </div>
+
       <div className="flex-1 min-h-0 flex">
-        {tocVisible && !isPDF && (
+        {!isPDF && (
           <TocDrawer
             items={tocItems.length > 0 ? tocItems : chaptersToTocFallback(chapters)}
             activeChapterId={activeChapterId ?? chapters[chapterOrd]?.id ?? null}
@@ -442,6 +457,7 @@ export default function ReaderPage() {
               styleColors={prefs.styleColors}
               onProgressAnchor={handleProgressAnchor}
               onActiveChapterChange={handleActiveChapterChange}
+              onProgressPercent={handleProgressPercent}
               initialAnchor={initialAnchor}
               searchKeyword={searchJump?.keyword ?? null}
               searchTargetChapterId={searchJump?.chapterId ?? null}
@@ -490,74 +506,68 @@ function chaptersToTocFallback(chapters: Chapter[]): TocItem[] {
   }));
 }
 
-// Header — back / TOC toggle / per-style colour swatches / AI / settings.
+// Header — back / book+chapter title block / per-style colour
+// chips with picker popover / AI / settings.
 //
-// The colour swatches are now organised PER STYLE rather than as a
-// single "global active colour" row. We render four mini-pills
-// (highlight / underline / wavy / strike), each showing the currently-
-// remembered colour for that style. Clicking the swatch cycles its
-// own colour without affecting the others.
+// Layout:
+//
+//   [←]      ┌─────────────────┐                  [高亮▾][下划▾][波浪▾][删除▾][笔记▾][AI][⚙]
+//            │ Book Title      │
+//            │ Chapter Title   │
+//            └─────────────────┘
+//
+// Each colour chip in the right-side cluster is a button labelled with
+// the style name and a swatch dot in the user's currently-set colour
+// for that style. Clicking the chip opens a 6-swatch popover; picking
+// a swatch updates the per-style preference (which then applies to
+// all future annotations of that style and to the underlying highlight
+// when creating a note from a fresh selection).
 function ReaderHeader({
-  title, bookTitle, onTOC, onSettings, onAI, onBack,
+  bookTitle, chapterTitle, onSettings, onAI, onBack,
   styleColors, onStyleColorChange,
 }: {
-  title: string; bookTitle: string;
-  onTOC: () => void; onSettings: () => void; onAI: () => void; onBack: () => void;
+  bookTitle: string;
+  chapterTitle: string;
+  onSettings: () => void; onAI: () => void; onBack: () => void;
   styleColors: ReaderPrefs['styleColors'];
-  onStyleColorChange: (s: HighlightStyle, c: HighlightColor) => void;
+  onStyleColorChange: (s: HighlightStyle | 'note', c: HighlightColor) => void;
 }) {
   return (
-    <header
-      className="flex items-center gap-2 px-4 h-12 border-b shrink-0"
-      style={{
-        borderColor: 'var(--reader-border)',
-        color: 'var(--reader-fg)',
-        background: 'var(--reader-bg)',
-      }}
-    >
+    <header className="reader-header">
       <button
         onClick={onBack}
-        className="opacity-70 hover:opacity-100 px-2 py-1 text-sm"
+        className="reader-header-icon-btn"
         title="返回书架"
         aria-label="返回书架"
       >
-        ←
-      </button>
-      <button
-        onClick={onTOC}
-        className="opacity-70 hover:opacity-100 p-1.5"
-        title="目录"
-        aria-label="目录"
-      >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-          <line x1="8" y1="6" x2="21" y2="6" />
-          <line x1="8" y1="12" x2="21" y2="12" />
-          <line x1="8" y1="18" x2="21" y2="18" />
-          <line x1="3" y1="6" x2="3.01" y2="6" />
-          <line x1="3" y1="12" x2="3.01" y2="12" />
-          <line x1="3" y1="18" x2="3.01" y2="18" />
+             strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M15 18l-6-6 6-6" />
         </svg>
       </button>
-      <div className="flex-1 min-w-0 text-center text-sm">
-        <div className="truncate font-medium">{title}</div>
-        {title !== bookTitle && (
-          <div className="text-xs opacity-60 truncate">{bookTitle}</div>
+
+      <div className="reader-header-title">
+        <div className="reader-header-book" title={bookTitle}>{bookTitle}</div>
+        {chapterTitle && (
+          <div className="reader-header-chapter" title={chapterTitle}>
+            {chapterTitle}
+          </div>
         )}
       </div>
 
-      {/* Per-style colour memory row. Each cluster shows the style
-          label tag plus the cycle-able colour swatch for that style. */}
-      <div className="flex items-center gap-2 mr-1" aria-label="批注样式与颜色">
-        <StyleColorPill style="highlight" current={styleColors.highlight} onChange={onStyleColorChange} />
-        <StyleColorPill style="underline" current={styleColors.underline} onChange={onStyleColorChange} />
-        <StyleColorPill style="wavy"      current={styleColors.wavy}      onChange={onStyleColorChange} />
-        <StyleColorPill style="strike"    current={styleColors.strike}    onChange={onStyleColorChange} />
+      {/* Per-style colour cluster. Each chip opens a colour-picker
+          popover; the active colour is shown as a swatch dot. */}
+      <div className="reader-style-cluster" aria-label="批注样式与颜色">
+        <StyleColorChip styleKey="highlight" label="高亮" current={styleColors.highlight} onPick={onStyleColorChange} />
+        <StyleColorChip styleKey="underline" label="下划" current={styleColors.underline} onPick={onStyleColorChange} />
+        <StyleColorChip styleKey="wavy"      label="波浪" current={styleColors.wavy}      onPick={onStyleColorChange} />
+        <StyleColorChip styleKey="strike"    label="删除" current={styleColors.strike}    onPick={onStyleColorChange} />
+        <StyleColorChip styleKey="note"      label="笔记" current={styleColors.note}      onPick={onStyleColorChange} />
       </div>
 
       <button
         onClick={onAI}
-        className="opacity-70 hover:opacity-100 p-1.5"
+        className="reader-header-icon-btn"
         title="AI 阅读助手"
         aria-label="AI 阅读助手"
       >
@@ -568,7 +578,7 @@ function ReaderHeader({
       </button>
       <button
         onClick={onSettings}
-        className="opacity-70 hover:opacity-100 p-1.5"
+        className="reader-header-icon-btn"
         title="阅读设置"
         aria-label="阅读设置"
       >
@@ -584,37 +594,85 @@ function ReaderHeader({
 
 const COLOR_CYCLE: HighlightColor[] = ['yellow', 'red', 'green', 'blue', 'purple', 'orange'];
 
-// One per-style cluster in the header. Click cycles the colour
-// forward; right-click / long-press could later open a picker, but
-// the cycle is enough for the "set my preferred colour for underlines"
-// case the user described.
-function StyleColorPill({
-  style, current, onChange,
+// Header chip + colour picker popover. Click toggles the popover open;
+// picking a colour fires onPick(style, colour) and closes it.
+//
+// Why a popover (vs the previous "click to cycle"): users want to GO
+// from "yellow" to "blue" without rotating through orange, red, and
+// green. Popover gives one-tap selection and also acts as a passive
+// indicator of "which colour is the default for this style right now".
+function StyleColorChip({
+  styleKey, label, current, onPick,
 }: {
-  style: HighlightStyle;
+  styleKey: HighlightStyle | 'note';
+  label: string;
   current: HighlightColor;
-  onChange: (s: HighlightStyle, c: HighlightColor) => void;
+  onPick: (s: HighlightStyle | 'note', c: HighlightColor) => void;
 }) {
-  const next = () => {
-    const idx = COLOR_CYCLE.indexOf(current);
-    const n = COLOR_CYCLE[(idx + 1) % COLOR_CYCLE.length];
-    onChange(style, n);
-  };
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close on outside click + Esc.
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!ref.current) return;
+      if (!ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
   return (
-    <button
-      type="button"
-      onClick={next}
-      className="style-color-pill"
-      data-style={style}
-      title={`${styleZh(style)}：${colorZh(current)}（点击切换）`}
-      aria-label={`${styleZh(style)}默认颜色：${colorZh(current)}`}
-    >
-      <span className="style-color-pill-label">{styleZh(style)}</span>
-      <span
-        className="style-color-pill-swatch"
-        style={{ background: swatchHex(current) }}
-      />
-    </button>
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="reader-style-chip"
+        aria-haspopup="true"
+        aria-expanded={open}
+        title={`${label}：当前 ${colorZh(current)}色（点击选择）`}
+      >
+        <span
+          className="reader-style-chip-dot"
+          style={{ background: swatchHex(current) }}
+        />
+        <span className="reader-style-chip-label">{label}</span>
+      </button>
+      {open && (
+        <div
+          className="color-popover"
+          style={{ top: '100%', right: 0, marginTop: 6 }}
+          role="listbox"
+          onMouseDown={(e: React.MouseEvent) => e.stopPropagation()}
+        >
+          {COLOR_CYCLE.map(c => (
+            <button
+              key={c}
+              type="button"
+              role="option"
+              aria-selected={c === current}
+              data-active={c === current ? '1' : undefined}
+              className="color-popover-swatch"
+              style={{ background: swatchHex(c) }}
+              onClick={() => {
+                onPick(styleKey, c);
+                setOpen(false);
+              }}
+              title={colorZh(c)}
+              aria-label={colorZh(c)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -626,14 +684,6 @@ function swatchHex(c: HighlightColor): string {
     case 'blue':   return '#63A5FF';
     case 'purple': return '#BA82EB';
     case 'orange': return '#FF9F50';
-  }
-}
-function styleZh(s: HighlightStyle): string {
-  switch (s) {
-    case 'highlight': return '高亮';
-    case 'underline': return '下划';
-    case 'wavy':      return '波浪';
-    case 'strike':    return '删除';
   }
 }
 function colorZh(c: HighlightColor): string {

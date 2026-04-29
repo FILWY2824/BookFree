@@ -59,7 +59,7 @@ export default function TocDrawer({
 
   return (
     <aside
-      className="h-full w-72 shrink-0 border-r flex flex-col"
+      className="reader-toc-dock h-full w-72 shrink-0 border-r flex flex-col"
       style={{
         background: 'var(--reader-bg)',
         borderColor: 'var(--reader-border)',

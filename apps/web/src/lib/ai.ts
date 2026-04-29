@@ -42,18 +42,70 @@ export interface AIChatResponse {
 
 // Check whether the server has any AI provider configured. We use this
 // once on AI panel mount to decide which empty state to show.
+//
+// "Configured" = at least one of:
+//   • the server's built-in AI (env var) is reachable and the user
+//     hasn't been quota-blocked, OR
+//   • the user has imported their own provider profile that's enabled
+//     and has a stored API key.
+//
+// We probe both surfaces in parallel because the built-in /api/ai/status
+// only knows about the server-side env var: a user who has only their
+// own custom provider would otherwise see "AI not configured" on the
+// reader panel even though their key works fine in /api/ai/chat. The
+// previous version of this function had exactly that bug, which is
+// what the user described as "I configured my own key but it doesn't
+// detect anything".
 export async function isAIConfigured(): Promise<boolean> {
-  try {
-    const r = await apiRequest<{ configured: boolean }>('/api/ai/status');
-    return !!r.configured;
-  } catch (e) {
-    if (e instanceof ApiException && e.status === 404) {
-      // Endpoint not deployed — treat as unconfigured rather than
-      // surfacing a confusing 404 to the user.
-      return false;
-    }
-    return false;
-  }
+  const result = await getAIAvailability();
+  return result.builtin || result.providers.some(p => p.enabled && p.hasKey);
+}
+
+export interface ProviderSummary {
+  id: string;
+  label: string;
+  enabled: boolean;
+  hasKey: boolean;
+  isDefault: boolean;
+}
+
+export interface AIAvailability {
+  /** Whether the server's built-in AI is configured AND the caller is
+   *  permitted to use it (quota / per-user toggle). */
+  builtin: boolean;
+  /** All custom provider profiles owned by the current user. */
+  providers: ProviderSummary[];
+  /** The provider id we recommend the UI default to. Picks the user's
+   *  marked-default custom provider if it has a key, else the first
+   *  enabled custom provider with a key, else '' for built-in. */
+  defaultProviderId: string;
+}
+
+export async function getAIAvailability(): Promise<AIAvailability> {
+  // Both endpoints are independent; if one 404s the other can still
+  // give us useful information.
+  const [statusRes, providersRes] = await Promise.all([
+    apiRequest<{ configured: boolean }>('/api/ai/status').catch((e) => {
+      if (e instanceof ApiException) return { configured: false };
+      return { configured: false };
+    }),
+    apiRequest<{ providers: ProviderSummary[] }>('/api/ai/providers').catch((e) => {
+      if (e instanceof ApiException) return { providers: [] as ProviderSummary[] };
+      return { providers: [] as ProviderSummary[] };
+    }),
+  ]);
+  const providers = providersRes.providers ?? [];
+  // Pick a sensible default: explicit `isDefault` wins, then first
+  // enabled-with-key, then fall back to built-in.
+  const explicitDefault = providers.find(p => p.isDefault && p.enabled && p.hasKey);
+  const firstUsable = providers.find(p => p.enabled && p.hasKey);
+  const defaultProviderId = explicitDefault?.id
+    ?? (statusRes.configured ? '' : (firstUsable?.id ?? ''));
+  return {
+    builtin: !!statusRes.configured,
+    providers,
+    defaultProviderId,
+  };
 }
 
 // Non-streaming chat call. Always tries first, because if the server

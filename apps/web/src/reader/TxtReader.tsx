@@ -96,6 +96,11 @@ interface Props {
    *  TOC chapter changes — used by ReaderPage to drive the active
    *  TOC entry without it lagging behind page flips. */
   onActiveChapterChange?: (chapterId: string) => void;
+  /** Called with a 0..1 reading-progress estimate. Combines the
+   *  current chapter's ord with the in-chapter page fraction so the
+   *  hairline progress bar in the reader chrome moves smoothly even
+   *  inside long chapters. */
+  onProgressPercent?: (pct: number) => void;
   /** Initial progress locator. When set on first mount, the reader
    *  navigates to the matching paragraph after the chapter renders. */
   initialAnchor?: { chapterId: string; locator: string } | null;
@@ -111,7 +116,7 @@ interface Props {
 export default function TxtReader({
   bookId, prefs, chapterOrd, pageMode,
   onChapterChange, onReady, onBusy, onSelection,
-  styleColors, onProgressAnchor, onActiveChapterChange, initialAnchor,
+  styleColors, onProgressAnchor, onActiveChapterChange, onProgressPercent, initialAnchor,
   searchKeyword, searchTargetChapterId, onSearchHandled,
 }: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([]);
@@ -375,6 +380,52 @@ export default function TxtReader({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [body, pageIdx, pageMode]);
 
+  // ── Progress percent emission ───────────────────────────────────
+  // We blend "which chapter we're in" with "how far through the
+  // current chapter's pages we are". For scroll modes the page
+  // fraction is approximated from scrollTop / scrollHeight; for
+  // paginated it's pageIdx / max(pageCount-1, 1). The result is a
+  // monotonic 0..1 value the reader chrome can render as a hairline
+  // bar without thrashing on every render.
+  useEffect(() => {
+    if (!onProgressPercent || chapters.length === 0) return;
+    const total = Math.max(1, chapters.length);
+    const base = chapterOrd / total;
+    const slice = 1 / total;
+
+    const emit = () => {
+      let frac = 0;
+      if (pageMode === 'paginated') {
+        frac = pageCount > 1 ? pageIdx / (pageCount - 1) : 0;
+      } else {
+        const sc = scrollRef.current;
+        if (sc && sc.scrollHeight > sc.clientHeight) {
+          frac = sc.scrollTop / (sc.scrollHeight - sc.clientHeight);
+        }
+      }
+      const pct = Math.max(0, Math.min(1, base + frac * slice));
+      onProgressPercent(pct);
+    };
+
+    emit();
+
+    if (pageMode !== 'paginated') {
+      const sc = scrollRef.current;
+      if (!sc) return;
+      let timer: number | null = null;
+      const onScroll = () => {
+        if (timer != null) window.clearTimeout(timer);
+        timer = window.setTimeout(emit, 120);
+      };
+      sc.addEventListener('scroll', onScroll, { passive: true });
+      return () => {
+        if (timer != null) window.clearTimeout(timer);
+        sc.removeEventListener('scroll', onScroll);
+      };
+    }
+    return undefined;
+  }, [chapters.length, chapterOrd, pageIdx, pageCount, pageMode, onProgressPercent]);
+
   // ── Search-result flash ─────────────────────────────────────────
   // When the user arrives via /search, ReaderPage forwards the keyword
   // and target chapter id. Once the matching chapter has rendered we
@@ -587,6 +638,71 @@ export default function TxtReader({
     setTbMode(null);
     setTbAnchor(null);
   }, [tbCurrent]);
+  void onCopy;  // kept for binary-compat with any external callers; the
+                // toolbar no longer surfaces 复制 because Ctrl/Cmd+C
+                // already handles the same case.
+
+  // Recolour an existing annotation. The server doesn't expose a PATCH
+  // endpoint for highlights yet, so we implement this client-side as
+  // "delete the old row, insert a fresh one with the new colour at the
+  // same locator". The user-visible effect is identical; the only
+  // observable difference is a new id, which doesn't matter for any
+  // current consumer (notes are also re-pointed to the new highlight
+  // if one was attached).
+  const onRecolor = useCallback(async (color: HighlightColor) => {
+    if (!tbCurrent || !body) return;
+    const old = tbCurrent;
+    if (old.color === color) {
+      setTbMode(null);
+      setTbAnchor(null);
+      return;
+    }
+    try {
+      const created = await createHighlight(bookId, {
+        chapterId: old.chapterId ?? body.id,
+        locator: old.locator,
+        selectedText: old.selectedText,
+        color,
+        style: old.style ?? 'highlight',
+      });
+      // Re-attach any note that was bound to the old highlight.
+      const attachedNote = notes.find(n => n.highlightId === old.id);
+      let migratedNote: typeof attachedNote = undefined;
+      if (attachedNote) {
+        try {
+          migratedNote = await createNote(bookId, {
+            highlightId: created.id,
+            chapterId: attachedNote.chapterId ?? body.id,
+            locator: attachedNote.locator,
+            selectedText: attachedNote.selectedText ?? old.selectedText,
+            body: attachedNote.body,
+          });
+          await deleteNote(attachedNote.id).catch(() => { /* ignore */ });
+        } catch {
+          // If we created the new highlight but couldn't migrate the
+          // note, prefer to keep the old highlight so the note isn't
+          // orphaned. Roll the new one back.
+          await deleteHighlight(created.id).catch(() => { /* ignore */ });
+          throw new Error('迁移笔记失败');
+        }
+      }
+      await deleteHighlight(old.id).catch(() => { /* ignore */ });
+
+      setHighlights(prev => [
+        ...prev.filter(h => h.id !== old.id),
+        created,
+      ]);
+      setNotes(prev => {
+        const without = prev.filter(n => n.id !== attachedNote?.id);
+        return migratedNote ? [...without, migratedNote] : without;
+      });
+    } catch (e) {
+      console.error('recolor failed', e);
+    }
+    setTbCurrent(null);
+    setTbMode(null);
+    setTbAnchor(null);
+  }, [bookId, body, notes, tbCurrent]);
 
   const onOpenNote = useCallback(() => {
     setTbMode('note');
@@ -726,6 +842,19 @@ export default function TxtReader({
               className="reader-prose reader-paginated-track"
               onClick={onProseClick}
               dangerouslySetInnerHTML={{ __html: html || '' }}
+              // Inline font styles are needed here because the parent
+              // track element's font cascade is sometimes overridden
+              // by descendant inline-styled elements in the chapter
+              // HTML. Setting them on the prose root makes the picker
+              // wins-everywhere — without this, swapping fontFamily in
+              // the settings drawer had no visible effect because some
+              // chapter content (e.g. <p style="..."> from imported
+              // EPUBs) shadowed the parent style.
+              style={{
+                fontSize: prefs.fontSize + 'px',
+                lineHeight: prefs.lineHeight,
+                fontFamily: bodyFontFamily,
+              }}
             />
           </PaginatedFrame>
         ) : (
@@ -769,10 +898,10 @@ export default function TxtReader({
           hasNote={hasNoteForCurrent}
           styleColors={styleColors}
           onApplyHighlight={onApplyHighlight}
+          onRecolor={onRecolor}
           onOpenNote={onOpenNote}
           onSaveNote={onSaveNote}
           onDeleteNote={onDeleteNote}
-          onCopy={onCopy}
           onDelete={onDelete}
           onClose={closeToolbar}
         />
