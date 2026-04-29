@@ -86,6 +86,70 @@ export function findTocItemByHeading(items: TocItem[], heading: string): TocItem
   });
 }
 
+/**
+ * Result of resolving a list of headings (deepest-last) against the
+ * TOC tree. We walk the headings in REVERSE so the deepest-matching
+ * TOC entry wins; if the user is reading section "1.2.1" and the TOC
+ * tops out at "1.2", we want "1.2" highlighted, not the chapter
+ * title above it.
+ *
+ * Returns null if no heading matches anything in the TOC. The
+ * `ancestorLabels` field is the chain of labels from the root TOC
+ * down to (and including) the matched node — the drawer uses these
+ * to auto-expand every node on the path so the active row is
+ * actually visible without the user having to fold things open
+ * manually.
+ */
+export interface TocHeadingResolution {
+  match: TocItem;
+  ancestorLabels: string[];
+}
+
+export function findTocByHeadingPath(
+  items: TocItem[],
+  headings: string[],
+): TocHeadingResolution | null {
+  // Deepest first: a hit on "1.2.1 一致性模型" should beat a hit on
+  // "第1章" even though both are on the screen.
+  for (let i = headings.length - 1; i >= 0; i--) {
+    const h = headings[i];
+    if (!h) continue;
+    const path: TocItem[] = [];
+    if (findPath(items, h, path)) {
+      return {
+        match: path[path.length - 1],
+        ancestorLabels: path.map(p => p.label),
+      };
+    }
+  }
+  return null;
+}
+
+// Recursive search: when the predicate matches, fill `path` with the
+// ancestor chain (root → match) and return true. The matching rules
+// are the same fuzzy rules used by findTocItemByHeading, but inlined
+// so we can capture the full path in one traversal.
+function findPath(items: TocItem[], heading: string, out: TocItem[]): boolean {
+  const needle = collapseSpaces(heading);
+  if (!needle) return false;
+  for (const it of items) {
+    out.push(it);
+    if (matches(it.label, needle)) return true;
+    if (it.children && it.children.length && findPath(it.children, heading, out)) {
+      return true;
+    }
+    out.pop();
+  }
+  return false;
+}
+
+function matches(label: string, needle: string): boolean {
+  const c = collapseSpaces(label);
+  if (c === needle) return true;
+  if (c.startsWith(needle)) return true;
+  return c.includes(needle) || needle.includes(c);
+}
+
 function walk(items: TocItem[], pred: (label: string) => boolean): TocItem | null {
   for (const it of items) {
     if (pred(it.label)) return it;

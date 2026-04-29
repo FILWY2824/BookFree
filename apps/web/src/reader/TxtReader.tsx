@@ -43,7 +43,7 @@ import {
   navigateToCFIv2,
   decodeLocatorAny,
   encodeLocatorV2,
-  closestPrecedingHeading,
+  precedingHeadings,
   type CFIv2,
 } from '../lib/locator';
 import {
@@ -99,14 +99,15 @@ interface Props {
    *  TOC chapter changes — used by ReaderPage to drive the active
    *  TOC entry without it lagging behind page flips. */
   onActiveChapterChange?: (chapterId: string) => void;
-  /** Called with the trimmed text of the closest heading preceding
-   *  the topmost visible paragraph. ReaderPage uses this for two
-   *  things: (a) showing the current SECTION title in the header
-   *  (instead of the parser's auto-generated "第 X 章" placeholder),
-   *  and (b) matching against the TOC so the drawer's active entry
-   *  tracks the user's scroll position even when a single chapterId
-   *  maps to many TOC entries. */
-  onActiveHeadingText?: (heading: string | null) => void;
+  /** Called with the ordered list of heading texts (h1..h6) that
+   *  precede the topmost visible paragraph in document order. The
+   *  LAST element is the deepest section the reader is currently
+   *  inside. ReaderPage matches this against the TOC deepest-first
+   *  so that when the user is in section "1.2.1" but the book's
+   *  TOC tops out at "1.2", the parent can still highlight "1.2"
+   *  rather than failing the match outright. Empty array when the
+   *  chapter has no headings at all. */
+  onActiveHeadingPath?: (path: string[]) => void;
   /** Called with a 0..1 reading-progress estimate. Combines the
    *  current chapter's ord with the in-chapter page fraction so the
    *  hairline progress bar in the reader chrome moves smoothly even
@@ -127,7 +128,7 @@ interface Props {
 export default function TxtReader({
   bookId, prefs, chapterOrd, pageMode,
   onChapterChange, onReady, onBusy, onSelection,
-  styleColors, onProgressAnchor, onActiveChapterChange, onActiveHeadingText, onProgressPercent, initialAnchor,
+  styleColors, onProgressAnchor, onActiveChapterChange, onActiveHeadingPath, onProgressPercent, initialAnchor,
   searchKeyword, searchTargetChapterId, onSearchHandled,
 }: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([]);
@@ -446,10 +447,11 @@ export default function TxtReader({
           locator: encodeLocatorV2(anchor),
         });
       }
-      // Section heading — null if no heading or the chapter has none.
-      // The parent dedupes, so emitting the same value repeatedly is
-      // free.
-      onActiveHeadingText?.(closestPrecedingHeading(r));
+      // Section heading path — the parent matches this against the
+      // TOC tree. We emit the array even when empty so the parent can
+      // clear its activeHeadingPath state when navigating to a chapter
+      // with no headings.
+      onActiveHeadingPath?.(precedingHeadings(r));
     };
 
     if (pageMode === 'paginated') {
@@ -620,10 +622,15 @@ export default function TxtReader({
       const sel = window.getSelection();
       const root = proseRef.current;
       if (!sel || sel.rangeCount === 0 || !root) {
-        // We don't immediately tear down; the user might be moving
-        // between actions in the toolbar. Only clear when there's
-        // truly no selection AND no toolbar open.
-        if (sel && sel.toString() === '' && tbMode === 'create') {
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      const text = range.toString();
+      // Empty selection in 'create' mode means the user clicked away
+      // and the caret moved — close the toolbar. (Both cases land
+      // here because selectionchange fires on caret moves too.)
+      if (!text || text.trim().length === 0) {
+        if (tbMode === 'create') {
           setTbMode(null);
           setTbAnchor(null);
           tbRangeRef.current = null;
@@ -631,9 +638,6 @@ export default function TxtReader({
         }
         return;
       }
-      const range = sel.getRangeAt(0);
-      const text = range.toString();
-      if (!text || text.trim().length === 0) return;
       // Confirm range is inside the prose root.
       if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
       const rect = range.getBoundingClientRect();
@@ -648,6 +652,49 @@ export default function TxtReader({
     };
     document.addEventListener('selectionchange', onSel);
     return () => document.removeEventListener('selectionchange', onSel);
+  }, [tbMode, onSelection]);
+
+  // Click-outside dismissal for the selection toolbar. The previous
+  // version only relied on selectionchange, which works when the
+  // user clicks BACK INTO the prose (the click collapses the
+  // selection, selectionchange fires, we close). It does NOT work
+  // when the user clicks outside the prose entirely — header,
+  // sidebar, dock — because in those cases the browser doesn't
+  // change the selection at all and selectionchange never fires.
+  // This handler picks up that case: any pointer-down whose target
+  // is outside the toolbar AND outside an existing-annotation
+  // <span data-hl-id> gets us to close. We listen on capture so a
+  // click that lands on a button still closes the toolbar BEFORE
+  // the button's own handler runs (matters for clicks on header
+  // chips that would otherwise leave a stale toolbar floating).
+  useEffect(() => {
+    if (!tbMode) return;
+    const onDocPointer = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // Click inside the toolbar itself? Don't close — that's the
+      // user choosing an action. Detect via data-selection-toolbar
+      // attribute we set on the toolbar root.
+      if (target.closest('[data-selection-toolbar="1"]')) return;
+      // Click on an existing highlight span in 'edit' mode? Let the
+      // prose's onProseClick handler decide what to do (it may swap
+      // to a different highlight in edit mode).
+      if (tbMode === 'edit' && target.closest('span[data-hl-id]')) return;
+      // Otherwise close. We don't clear the selection itself — the
+      // browser's own click handling will collapse it as part of
+      // moving the caret to wherever the user clicked.
+      setTbMode(null);
+      setTbAnchor(null);
+      setTbCurrent(null);
+      tbRangeRef.current = null;
+      onSelection?.(null);
+    };
+    document.addEventListener('mousedown', onDocPointer, true);
+    document.addEventListener('touchstart', onDocPointer as unknown as EventListener, true);
+    return () => {
+      document.removeEventListener('mousedown', onDocPointer, true);
+      document.removeEventListener('touchstart', onDocPointer as unknown as EventListener, true);
+    };
   }, [tbMode, onSelection]);
 
   // Click on an existing highlight span → enter edit mode.
@@ -1069,7 +1116,18 @@ function PaginatedFrame({
       <div
         style={{
           height: '100%',
-          padding: '3rem 1.5rem',
+          // Asymmetric padding: top is 3rem (matches the rest of the
+          // chrome), bottom is generous (4.5rem) so the user always
+          // has visible breathing room between the last visible line
+          // and the screen edge. CSS multicol with column-fill:auto
+          // packs content into the column from the top, and Chrome
+          // sometimes renders a partial last line right at the column
+          // bottom — without this buffer the partial line sits flush
+          // against the viewport edge and looks cut off ("字都是屏幕
+          // 下方"). The extra space at the bottom is the simplest fix
+          // and also matches the visual conventions of dedicated
+          // ebook readers (Kindle, Apple Books, 微信读书).
+          padding: '3rem 1.5rem 4.5rem',
           maxWidth: columnMaxWidth(prefs),
           margin: '0 auto',
           boxSizing: 'border-box',

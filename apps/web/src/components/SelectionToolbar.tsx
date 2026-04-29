@@ -120,6 +120,7 @@ export default function SelectionToolbar({
       <div
         ref={ref}
         className="note-editor"
+        data-selection-toolbar="1"
         style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden' }}
         onMouseDown={(e: React.MouseEvent) => e.stopPropagation()}
       >
@@ -161,6 +162,7 @@ export default function SelectionToolbar({
       <div
         ref={ref}
         className="mini-toolbar"
+        data-selection-toolbar="1"
         style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden' }}
         onMouseDown={(e: React.MouseEvent) => {
           e.preventDefault();
@@ -213,6 +215,7 @@ export default function SelectionToolbar({
     <div
       ref={ref}
       className="mini-toolbar"
+      data-selection-toolbar="1"
       style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden' }}
       onMouseDown={(e: React.MouseEvent) => {
         // Prevent the click from collapsing the user's selection.

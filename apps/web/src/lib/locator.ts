@@ -415,78 +415,123 @@ export function topVisibleAnchor(root: HTMLElement, chapterId: string): CFIv2 | 
   };
 }
 
-// Find the closest heading (h1..h6) that precedes the topmost-visible
-// paragraph in document order. Used by the reader to surface "which
-// section am I in right now" for the header chapter title and the TOC
-// active highlight — many EPUBs ship multiple sections per file, so a
-// single chapterId maps to several TOC entries and the title alone
-// can't tell us which entry is active.
+// Find every heading (h1..h6) that lies at or before the topmost
+// visible paragraph in document order, returning their trimmed text
+// in document order. Used by the reader to surface "where in the
+// section hierarchy am I right now" for the header chapter title and
+// the TOC active highlight.
 //
-// Returns the trimmed text content of the heading, or null if none
-// is found (no headings, or the topmost paragraph is before all of
-// them). Empty headings are ignored.
+// Returning an array (rather than just the closest one as the
+// previous version did) lets the parent walk DEEPEST-FIRST when
+// matching against the TOC: a screen showing section "1.2.1 一致性
+// 模型" inside a chapter whose TOC only goes two levels deep would
+// previously fail to highlight anything; with the array, the parent
+// can fall back to "1.2 一致性" (the next heading up) and highlight
+// THAT, so the user always sees a real ancestor in the TOC dock.
 //
-// "Closest preceding" means: the heading element whose top edge is
-// at or above the topmost visible paragraph's top edge, and is the
-// LAST such heading in document order. We use bounding rects so it
-// works in both paginated (post-transform geometry) and scroll modes.
-export function closestPrecedingHeading(root: HTMLElement): string | null {
+// The returned list always contains at least one entry when the
+// chapter has any non-empty heading; it is empty only when no
+// headings exist at all. The LAST entry is the heading the reader
+// is currently inside.
+export function precedingHeadings(root: HTMLElement): string[] {
   const headings = Array.from(
     root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'),
   );
-  if (headings.length === 0) return null;
+  if (headings.length === 0) return [];
 
   const paragraphs = collectParagraphs(root);
   // Decide the "current viewing y": the top of the first visible
-  // paragraph, or just 0 if nothing is visible.
+  // paragraph, or just 0 if nothing is visible (chapter just loaded).
+  // Visibility is BOTH vertical and horizontal because in paginated
+  // mode the chapter's content is laid out across many columns
+  // arranged horizontally and only one column is on-screen at a time.
+  // Without the horizontal check we'd treat "column 3 paragraph that
+  // happens to share a y-coordinate with our column 1" as visible.
+  const vw = window.innerWidth || document.documentElement.clientWidth;
+  const isVisible = (rect: DOMRect) =>
+    rect.top >= 0 && rect.bottom > 0 &&
+    rect.left < vw && rect.right > 0;
   let currentTop = 0;
   let foundVisible = false;
   for (const p of paragraphs) {
     const rect = p.el.getBoundingClientRect();
-    if (rect.top >= 0 && rect.bottom > 0) {
+    if (isVisible(rect)) {
       currentTop = rect.top;
       foundVisible = true;
       break;
     }
   }
-  // If nothing is visible (e.g. chapter just loaded, scroll==0), fall
-  // back to the very first heading in the chapter — that's the section
-  // the reader is about to read.
+  // If nothing is visible, the user is just about to start the
+  // chapter — return only the first non-empty heading so the header
+  // shows that one section instead of a giant ancestor list.
   if (!foundVisible) {
     for (const h of headings) {
       const t = (h.textContent ?? '').trim();
-      if (t) return t;
+      if (t) return [t];
     }
-    return null;
+    return [];
   }
 
-  // Walk headings in document order; remember the LAST one whose top
-  // edge is at or above currentTop (with a small tolerance so a
-  // heading right at the page top counts).
-  let best: string | null = null;
+  const out: string[] = [];
+  // Tolerance: a heading right at the page top should count as "in
+  // view". A few px of slop covers sub-pixel rounding and tiny
+  // top-margin artefacts.
+  const TOL = 4;
   for (const h of headings) {
     const text = (h.textContent ?? '').trim();
     if (!text) continue;
-    const top = h.getBoundingClientRect().top;
-    if (top <= currentTop + 4) {
-      best = text;
+    const rect = h.getBoundingClientRect();
+    // Same horizontal-overlap caveat as the paragraph scan: a heading
+    // on a different page (column) would otherwise sneak in. We skip
+    // those by checking horizontal overlap with the viewport, but we
+    // still need to traverse them in document order to find what
+    // comes BEFORE the current page — so we look at horizontal
+    // position relative to the first visible paragraph: anything
+    // strictly to its right is on a future page.
+    if (rect.left >= vw) {
+      // Heading is on a later page than the visible paragraph. Stop;
+      // anything beyond is also future.
+      break;
+    }
+    if (rect.right <= 0 || rect.top > currentTop + TOL) {
+      // Heading is on an earlier (off-screen-left) page or already
+      // past the visible top. The earlier-page case is "previously
+      // read" content, which is exactly what we want to record as
+      // ancestor. So we keep recording but tighten the y-check: a
+      // heading on a previous page can pass the y-check because
+      // off-screen-left columns share the same y-axis. Skip
+      // horizontally-not-overlapping headings ONLY when also past
+      // the current top, so we don't push fake ancestors from way
+      // ahead of the user.
+      if (rect.top > currentTop + TOL) break;
+      // off-screen-left, on or before current vertical position:
+      // it's a real preceding heading — record it.
+      out.push(text);
+      continue;
+    }
+    if (rect.top <= currentTop + TOL) {
+      out.push(text);
     } else {
-      // Once a heading is past the current viewport top, the rest are
-      // also past — stop scanning.
       break;
     }
   }
-  // If no heading precedes the current paragraph, return the FIRST
-  // heading. The reader is in the lead-in before that section — better
-  // to surface "this chapter starts with X" than show nothing.
-  if (best == null) {
+  // If even the first heading is past the current viewport, still
+  // emit it — better to show "this chapter starts with X" than
+  // nothing.
+  if (out.length === 0) {
     for (const h of headings) {
       const t = (h.textContent ?? '').trim();
-      if (t) return t;
+      if (t) { out.push(t); break; }
     }
-    return null;
   }
-  return best;
+  return out;
+}
+
+/** @deprecated kept for any external callers still relying on the
+ *  single-heading API; new code should use precedingHeadings instead. */
+export function closestPrecedingHeading(root: HTMLElement): string | null {
+  const all = precedingHeadings(root);
+  return all.length > 0 ? all[all.length - 1] : null;
 }
 
 // Scroll / page-flip the reader so the paragraph in `cfi` becomes

@@ -48,7 +48,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, ApiException } from '../lib/api';
 import { loadPrefs, savePrefs, resolvePageMode, type ReaderPrefs } from '../lib/prefs';
-import { fetchToc, findTocItemByHeading, type TocItem } from '../lib/toc';
+import { fetchToc, findTocByHeadingPath, type TocItem } from '../lib/toc';
 import type { HighlightColor, HighlightStyle } from '../lib/highlights';
 import SettingsDrawer from '../components/SettingsDrawer';
 import TocDrawer from '../components/TocDrawer';
@@ -114,12 +114,12 @@ export default function ReaderPage() {
   /** 0..1 reading-progress estimate emitted by the reader. Drives the
    *  hairline progress bar between the header and the content area. */
   const [progressPct, setProgressPct] = useState(0);
-  /** Closest preceding heading text reported by the reader. Used to
-   *  pick a TOC entry to mark active when a single chapter file
-   *  contains many TOC sections, and to display the user's actual
-   *  current section in the header instead of the parser's auto-
-   *  generated "第 X 章" placeholder. */
-  const [activeHeadingText, setActiveHeadingText] = useState<string | null>(null);
+  /** Closest preceding headings reported by the reader, deepest LAST.
+   *  We accept the full ancestor chain (not just the deepest one)
+   *  so we can match against the TOC at multiple levels: when a
+   *  reader is in section "1.2.1" but the TOC tops out at "1.2", we
+   *  highlight "1.2" rather than failing the match entirely. */
+  const [activeHeadingPath, setActiveHeadingPath] = useState<string[]>([]);
 
   const [bookReady, setBookReady] = useState(false);
   const [readerBusy, setReaderBusy] = useState(false);
@@ -283,45 +283,72 @@ export default function ReaderPage() {
     [book, prefs.pageMode],
   );
 
-  // Resolve the chapter / section title shown in the header. The
-  // user fed back that the previous version showed "第 37 章" — that
-  // was the parser's auto-generated label for spine entries with no
-  // declared title; the user wanted the REAL section the page is in.
-  // Resolution order, most-specific first:
+  // Resolve the chapter / section title shown in the header AND the
+  // active TOC entry highlight. Resolution chain, most-specific first:
   //
-  //   1. Match the closest preceding heading from the rendered DOM
-  //      against the TOC tree. If we find a TOC entry whose label
-  //      matches the heading, use that label. Also returns the
-  //      matching entry so the TOC drawer can highlight the right row
-  //      even when many entries share the same chapterId.
-  //   2. If no TOC label matches but the heading text is non-empty,
-  //      use the heading text directly. This handles the case where
-  //      the chapter's headings are real but the TOC didn't index
-  //      them.
-  //   3. Fall back to the chapters table row's title — but only if
-  //      it looks like a real human title. We treat anything that
-  //      matches an auto-generated pattern (e.g. "第 37 章") as a
-  //      placeholder and prefer to show empty over the placeholder.
-  //   4. Empty string when nothing meaningful is available.
-  const { chapterTitle, activeTocLabel } = useMemo(() => {
-    if (!book || isPDF) return { chapterTitle: '', activeTocLabel: null as string | null };
-    // Try heading match against TOC.
-    if (activeHeadingText) {
-      const tocHit = findTocItemByHeading(tocItems, activeHeadingText);
-      if (tocHit && tocHit.label) {
-        return { chapterTitle: tocHit.label, activeTocLabel: tocHit.label };
-      }
-      return { chapterTitle: activeHeadingText, activeTocLabel: null };
+  //   1. Walk the heading path DEEPEST-FIRST against the TOC tree.
+  //      The user fed back that when reading "1.2.1 一致性模型" with
+  //      a TOC that only goes to "1.2 一致性", the previous version
+  //      showed nothing — neither in the header nor highlighted in
+  //      the TOC. The new logic tries each heading from the deepest
+  //      visible one upward until one matches the TOC; the matched
+  //      label is what we display, and its ancestor path drives
+  //      auto-expand in the drawer. So a screen showing "1.2.1"
+  //      under a "1.2"-truncated TOC now shows "1.2 一致性" in the
+  //      header and highlights that row in the dock.
+  //
+  //   2. If NO heading along the path matches the TOC at all, fall
+  //      back to displaying the deepest heading text raw. This is
+  //      better than blank when the chapter has real section titles
+  //      but the TOC was either missing or truncated by the parser.
+  //
+  //   3. Final fallback: chapters[ord].title — but only when it
+  //      doesn't look like a parser-generated placeholder. Auto-
+  //      generated "第 N 章" / "Chapter N" titles are treated as
+  //      empty so the header doesn't show fabricated chapter numbers.
+  //
+  //   4. Empty string. Header centre stays blank rather than lying.
+  const { chapterTitle, activeTocLabel, activeTocPath } = useMemo(() => {
+    type R = {
+      chapterTitle: string;
+      activeTocLabel: string | null;
+      activeTocPath: string[];
+    };
+    if (!book || isPDF) {
+      return { chapterTitle: '', activeTocLabel: null, activeTocPath: [] } as R;
     }
+
+    // Try the heading path against the TOC, deepest-first.
+    if (activeHeadingPath.length > 0) {
+      const hit = findTocByHeadingPath(tocItems, activeHeadingPath);
+      if (hit) {
+        return {
+          chapterTitle: hit.match.label,
+          activeTocLabel: hit.match.label,
+          activeTocPath: hit.ancestorLabels,
+        } as R;
+      }
+      // No TOC match anywhere on the path — show the deepest
+      // (most-specific) heading text directly.
+      const deepest = activeHeadingPath[activeHeadingPath.length - 1];
+      return {
+        chapterTitle: deepest,
+        activeTocLabel: null,
+        activeTocPath: [],
+      } as R;
+    }
+
+    // No headings detected — fall back to the chapter row title if
+    // it isn't a placeholder.
     const active = activeChapterId
       ? chapters.find(c => c.id === activeChapterId)
       : chapters[chapterOrd];
     const raw = active?.title?.trim() ?? '';
     if (raw && !isAutoChapterTitle(raw, active?.ord ?? -1)) {
-      return { chapterTitle: raw, activeTocLabel: null };
+      return { chapterTitle: raw, activeTocLabel: null, activeTocPath: [] } as R;
     }
-    return { chapterTitle: '', activeTocLabel: null };
-  }, [book, chapters, chapterOrd, activeChapterId, activeHeadingText, tocItems, isPDF]);
+    return { chapterTitle: '', activeTocLabel: null, activeTocPath: [] } as R;
+  }, [book, chapters, chapterOrd, activeChapterId, activeHeadingPath, tocItems, isPDF]);
 
   // ── Handlers passed to readers ─────────────────────────────────
   const handleReaderReady = useCallback(() => setBookReady(true), []);
@@ -333,11 +360,17 @@ export default function ReaderPage() {
   const handleActiveChapterChange = useCallback((cid: string) => {
     setActiveChapterId(cid);
   }, []);
-  const handleActiveHeadingText = useCallback((h: string | null) => {
+  const handleActiveHeadingPath = useCallback((path: string[]) => {
     // Dedupe — the reader emits this on every progress tick, and we
     // don't want to invalidate downstream memos when the value didn't
-    // actually change.
-    setActiveHeadingText(prev => (prev === h ? prev : h));
+    // actually change. Compare both length and contents.
+    setActiveHeadingPath(prev => {
+      if (prev.length !== path.length) return path;
+      for (let i = 0; i < prev.length; i++) {
+        if (prev[i] !== path[i]) return path;
+      }
+      return prev;
+    });
   }, []);
   const handleProgressPercent = useCallback((p: number) => setProgressPct(p), []);
 
@@ -422,6 +455,7 @@ export default function ReaderPage() {
             items={tocItems.length > 0 ? tocItems : chaptersToTocFallback(chapters)}
             activeChapterId={activeChapterId ?? chapters[chapterOrd]?.id ?? null}
             activeLabel={activeTocLabel}
+            activePath={activeTocPath}
             onPick={handleTocPick}
             locateTick={tocLocateTick}
             onLocateRequest={() => setTocLocateTick(t => t + 1)}
@@ -496,7 +530,7 @@ export default function ReaderPage() {
               styleColors={prefs.styleColors}
               onProgressAnchor={handleProgressAnchor}
               onActiveChapterChange={handleActiveChapterChange}
-              onActiveHeadingText={handleActiveHeadingText}
+              onActiveHeadingPath={handleActiveHeadingPath}
               onProgressPercent={handleProgressPercent}
               initialAnchor={initialAnchor}
               searchKeyword={searchJump?.keyword ?? null}
