@@ -48,7 +48,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, ApiException } from '../lib/api';
 import { loadPrefs, savePrefs, resolvePageMode, type ReaderPrefs } from '../lib/prefs';
-import { fetchToc, type TocItem } from '../lib/toc';
+import { fetchToc, findTocItemByHeading, type TocItem } from '../lib/toc';
 import type { HighlightColor, HighlightStyle } from '../lib/highlights';
 import SettingsDrawer from '../components/SettingsDrawer';
 import TocDrawer from '../components/TocDrawer';
@@ -114,6 +114,12 @@ export default function ReaderPage() {
   /** 0..1 reading-progress estimate emitted by the reader. Drives the
    *  hairline progress bar between the header and the content area. */
   const [progressPct, setProgressPct] = useState(0);
+  /** Closest preceding heading text reported by the reader. Used to
+   *  pick a TOC entry to mark active when a single chapter file
+   *  contains many TOC sections, and to display the user's actual
+   *  current section in the header instead of the parser's auto-
+   *  generated "第 X 章" placeholder. */
+  const [activeHeadingText, setActiveHeadingText] = useState<string | null>(null);
 
   const [bookReady, setBookReady] = useState(false);
   const [readerBusy, setReaderBusy] = useState(false);
@@ -277,19 +283,45 @@ export default function ReaderPage() {
     [book, prefs.pageMode],
   );
 
-  // We surface book title and chapter title separately now (per the
-  // user's "书名与章节需要分开" feedback). The chapter falls back to
-  // the active-chapter id reported by the reader so it tracks
-  // page-flip in real time; the book title comes straight from the
-  // book row.
-  const chapterTitle = useMemo(() => {
-    if (!book) return '';
-    if (isPDF) return '';
+  // Resolve the chapter / section title shown in the header. The
+  // user fed back that the previous version showed "第 37 章" — that
+  // was the parser's auto-generated label for spine entries with no
+  // declared title; the user wanted the REAL section the page is in.
+  // Resolution order, most-specific first:
+  //
+  //   1. Match the closest preceding heading from the rendered DOM
+  //      against the TOC tree. If we find a TOC entry whose label
+  //      matches the heading, use that label. Also returns the
+  //      matching entry so the TOC drawer can highlight the right row
+  //      even when many entries share the same chapterId.
+  //   2. If no TOC label matches but the heading text is non-empty,
+  //      use the heading text directly. This handles the case where
+  //      the chapter's headings are real but the TOC didn't index
+  //      them.
+  //   3. Fall back to the chapters table row's title — but only if
+  //      it looks like a real human title. We treat anything that
+  //      matches an auto-generated pattern (e.g. "第 37 章") as a
+  //      placeholder and prefer to show empty over the placeholder.
+  //   4. Empty string when nothing meaningful is available.
+  const { chapterTitle, activeTocLabel } = useMemo(() => {
+    if (!book || isPDF) return { chapterTitle: '', activeTocLabel: null as string | null };
+    // Try heading match against TOC.
+    if (activeHeadingText) {
+      const tocHit = findTocItemByHeading(tocItems, activeHeadingText);
+      if (tocHit && tocHit.label) {
+        return { chapterTitle: tocHit.label, activeTocLabel: tocHit.label };
+      }
+      return { chapterTitle: activeHeadingText, activeTocLabel: null };
+    }
     const active = activeChapterId
       ? chapters.find(c => c.id === activeChapterId)
       : chapters[chapterOrd];
-    return active?.title?.trim() || '';
-  }, [book, chapters, chapterOrd, activeChapterId, isPDF]);
+    const raw = active?.title?.trim() ?? '';
+    if (raw && !isAutoChapterTitle(raw, active?.ord ?? -1)) {
+      return { chapterTitle: raw, activeTocLabel: null };
+    }
+    return { chapterTitle: '', activeTocLabel: null };
+  }, [book, chapters, chapterOrd, activeChapterId, activeHeadingText, tocItems, isPDF]);
 
   // ── Handlers passed to readers ─────────────────────────────────
   const handleReaderReady = useCallback(() => setBookReady(true), []);
@@ -300,6 +332,12 @@ export default function ReaderPage() {
   }, []);
   const handleActiveChapterChange = useCallback((cid: string) => {
     setActiveChapterId(cid);
+  }, []);
+  const handleActiveHeadingText = useCallback((h: string | null) => {
+    // Dedupe — the reader emits this on every progress tick, and we
+    // don't want to invalidate downstream memos when the value didn't
+    // actually change.
+    setActiveHeadingText(prev => (prev === h ? prev : h));
   }, []);
   const handleProgressPercent = useCallback((p: number) => setProgressPct(p), []);
 
@@ -383,6 +421,7 @@ export default function ReaderPage() {
           <TocDrawer
             items={tocItems.length > 0 ? tocItems : chaptersToTocFallback(chapters)}
             activeChapterId={activeChapterId ?? chapters[chapterOrd]?.id ?? null}
+            activeLabel={activeTocLabel}
             onPick={handleTocPick}
             locateTick={tocLocateTick}
             onLocateRequest={() => setTocLocateTick(t => t + 1)}
@@ -457,6 +496,7 @@ export default function ReaderPage() {
               styleColors={prefs.styleColors}
               onProgressAnchor={handleProgressAnchor}
               onActiveChapterChange={handleActiveChapterChange}
+              onActiveHeadingText={handleActiveHeadingText}
               onProgressPercent={handleProgressPercent}
               initialAnchor={initialAnchor}
               searchKeyword={searchJump?.keyword ?? null}
@@ -506,6 +546,25 @@ function chaptersToTocFallback(chapters: Chapter[]): TocItem[] {
   }));
 }
 
+// Detect whether `title` looks like an auto-generated placeholder put
+// there by the ingest parser when the chapter file had no real title.
+// We treat the title "第 N 章" (allowing punctuation, full-width spaces)
+// AND a bare ord-derived count "Chapter 12" / "12" as placeholders.
+// Real titles set by authors almost never collide with these, and
+// hiding the placeholder in the header is a much better default than
+// surfacing fabricated chapter numbers the user sees as "wrong".
+function isAutoChapterTitle(title: string, ord: number): boolean {
+  const t = title.replace(/\s+/g, '').trim();
+  if (!t) return true;
+  // "第N章" / "第N节" / "第N篇" — common in CJK ingest output.
+  if (/^第[0-9零一二三四五六七八九十百千]+(章|节|節|篇|回|卷)$/.test(t)) return true;
+  // Equal to chapter number alone.
+  if (ord >= 0 && t === String(ord + 1)) return true;
+  // English shapes: "Chapter 12", "Section 3".
+  if (/^(chapter|section|part)\s*\d+$/i.test(title.trim())) return true;
+  return false;
+}
+
 // Header — back / book+chapter title block / per-style colour
 // chips with picker popover / AI / settings.
 //
@@ -532,22 +591,36 @@ function ReaderHeader({
   styleColors: ReaderPrefs['styleColors'];
   onStyleColorChange: (s: HighlightStyle | 'note', c: HighlightColor) => void;
 }) {
+  // Three-zone layout (per the user's "书名放到左侧，章节放中间" feedback):
+  //
+  //   [← Book Title …………………………] [   Chapter Title   ] [chips][AI][⚙]
+  //   └── left, flexes & truncates ─┘ └── absolute-centred ─┘ └── right ──┘
+  //
+  // The centre zone is absolutely positioned so it stays in the
+  // viewport's horizontal middle regardless of how wide the left or
+  // right zones are. We constrain its max-width and pointer-events so
+  // it doesn't overlap the right-side controls when both titles are
+  // long.
   return (
     <header className="reader-header">
-      <button
-        onClick={onBack}
-        className="reader-header-icon-btn"
-        title="返回书架"
-        aria-label="返回书架"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M15 18l-6-6 6-6" />
-        </svg>
-      </button>
+      <div className="reader-header-left">
+        <button
+          onClick={onBack}
+          className="reader-header-icon-btn"
+          title="返回书架"
+          aria-label="返回书架"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M15 18l-6-6 6-6" />
+          </svg>
+        </button>
+        <div className="reader-header-book" title={bookTitle}>
+          {bookTitle}
+        </div>
+      </div>
 
-      <div className="reader-header-title">
-        <div className="reader-header-book" title={bookTitle}>{bookTitle}</div>
+      <div className="reader-header-center" aria-live="polite">
         {chapterTitle && (
           <div className="reader-header-chapter" title={chapterTitle}>
             {chapterTitle}
@@ -555,39 +628,41 @@ function ReaderHeader({
         )}
       </div>
 
-      {/* Per-style colour cluster. Each chip opens a colour-picker
-          popover; the active colour is shown as a swatch dot. */}
-      <div className="reader-style-cluster" aria-label="批注样式与颜色">
-        <StyleColorChip styleKey="highlight" label="高亮" current={styleColors.highlight} onPick={onStyleColorChange} />
-        <StyleColorChip styleKey="underline" label="下划" current={styleColors.underline} onPick={onStyleColorChange} />
-        <StyleColorChip styleKey="wavy"      label="波浪" current={styleColors.wavy}      onPick={onStyleColorChange} />
-        <StyleColorChip styleKey="strike"    label="删除" current={styleColors.strike}    onPick={onStyleColorChange} />
-        <StyleColorChip styleKey="note"      label="笔记" current={styleColors.note}      onPick={onStyleColorChange} />
-      </div>
+      <div className="reader-header-right">
+        {/* Per-style colour cluster. Each chip opens a colour-picker
+            popover; the active colour is shown as a swatch dot. */}
+        <div className="reader-style-cluster" aria-label="批注样式与颜色">
+          <StyleColorChip styleKey="highlight" label="高亮" current={styleColors.highlight} onPick={onStyleColorChange} />
+          <StyleColorChip styleKey="underline" label="下划" current={styleColors.underline} onPick={onStyleColorChange} />
+          <StyleColorChip styleKey="wavy"      label="波浪" current={styleColors.wavy}      onPick={onStyleColorChange} />
+          <StyleColorChip styleKey="strike"    label="删除" current={styleColors.strike}    onPick={onStyleColorChange} />
+          <StyleColorChip styleKey="note"      label="笔记" current={styleColors.note}      onPick={onStyleColorChange} />
+        </div>
 
-      <button
-        onClick={onAI}
-        className="reader-header-icon-btn"
-        title="AI 阅读助手"
-        aria-label="AI 阅读助手"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
-        </svg>
-      </button>
-      <button
-        onClick={onSettings}
-        className="reader-header-icon-btn"
-        title="阅读设置"
-        aria-label="阅读设置"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" />
-        </svg>
-      </button>
+        <button
+          onClick={onAI}
+          className="reader-header-icon-btn"
+          title="AI 阅读助手"
+          aria-label="AI 阅读助手"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+          </svg>
+        </button>
+        <button
+          onClick={onSettings}
+          className="reader-header-icon-btn"
+          title="阅读设置"
+          aria-label="阅读设置"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" />
+          </svg>
+        </button>
+      </div>
     </header>
   );
 }

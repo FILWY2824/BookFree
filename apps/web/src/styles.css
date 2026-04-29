@@ -71,6 +71,26 @@ body {
 .reader-prose h1 { font-size: 1.5em; }
 .reader-prose h2 { font-size: 1.25em; }
 .reader-prose h3 { font-size: 1.1em; }
+/* Defence-in-depth against EPUB-injected leading whitespace.
+   `cleanLeadingWhitespace` in TxtReader strips leading <br> / empty
+   <p> / empty <div> nodes and zeroes inline `margin-top` on the first
+   child, but EPUB CSS sometimes still leaves a non-trivial `margin-top`
+   on the first heading via class selectors we can't predict. The two
+   rules below cap that:
+     • The first child of the prose box never gets a top margin or
+       top padding — chapter content always starts flush with the
+       reader's own padding.
+     • Any heading anywhere in the prose is capped at 1em top margin,
+       so even mid-chapter "chapter break" headings can't push half
+       a page of empty space onto a paginated column. */
+.reader-prose > *:first-child {
+  margin-top: 0 !important;
+  padding-top: 0 !important;
+}
+.reader-prose h1, .reader-prose h2, .reader-prose h3,
+.reader-prose h4, .reader-prose h5, .reader-prose h6 {
+  margin-top: 1em;
+}
 .reader-prose img { max-width: 100%; height: auto; margin: 1em auto; display: block; }
 .reader-prose blockquote {
   border-left: 3px solid var(--reader-border);
@@ -129,6 +149,19 @@ body {
 .reader-paginated h1 { font-size: 1.5em; }
 .reader-paginated h2 { font-size: 1.25em; }
 .reader-paginated h3 { font-size: 1.1em; }
+/* Same first-child / heading clamps as .reader-prose. CRITICAL for
+   paginated mode: a single h1 with `margin-top: 6em` declared inline
+   by the EPUB will, in CSS columns, push the heading down 6em from
+   the column top and leave the entire visible page apparently blank.
+   That's the user-reported "字都是屏幕下方" bug. */
+.reader-paginated > *:first-child {
+  margin-top: 0 !important;
+  padding-top: 0 !important;
+}
+.reader-paginated h1, .reader-paginated h2, .reader-paginated h3,
+.reader-paginated h4, .reader-paginated h5, .reader-paginated h6 {
+  margin-top: 1em;
+}
 .reader-paginated img,
 .reader-paginated svg,
 .reader-paginated figure,
@@ -806,16 +839,21 @@ mark.search-flash {
   flex-shrink: 0;
   position: relative;
 }
-.reader-header-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  text-align: center;
+
+/* Three-zone header layout. The centre zone is absolutely positioned
+   so the chapter title is anchored to the visual middle of the
+   viewport regardless of how wide the left (book title) or right
+   (controls) zones grow. We constrain its width to 40% so it can't
+   spill into the controls when the chapter title is long. */
+.reader-header-left {
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  line-height: 1.2;
-  overflow: hidden;
-  padding: 0 8px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  /* Cap the left zone so the back button + book title stay readable
+     but never push the centred chapter off-screen. */
+  max-width: 32%;
+  flex: 0 1 auto;
 }
 .reader-header-book {
   font-family: ui-serif, Georgia, "Songti SC", "SimSun", serif;
@@ -826,15 +864,39 @@ mark.search-flash {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--reader-fg);
+  min-width: 0;
+}
+.reader-header-center {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  transform: translateX(-50%);
+  /* Width-bounded so it doesn't bleed into the right cluster. */
+  max-width: 40%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;  /* never blocks clicks on right-side controls */
 }
 .reader-header-chapter {
-  font-size: 11px;
-  color: var(--reader-muted);
+  font-family: ui-serif, Georgia, "Songti SC", "SimSun", serif;
+  font-size: 13px;
+  color: var(--reader-fg);
+  opacity: 0.85;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 2px;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
+  pointer-events: auto;  /* but the chapter span itself is hoverable */
+  max-width: 100%;
+}
+.reader-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
 }
 .reader-header-icon-btn {
   width: 30px;

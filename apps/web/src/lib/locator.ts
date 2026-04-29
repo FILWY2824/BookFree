@@ -415,6 +415,80 @@ export function topVisibleAnchor(root: HTMLElement, chapterId: string): CFIv2 | 
   };
 }
 
+// Find the closest heading (h1..h6) that precedes the topmost-visible
+// paragraph in document order. Used by the reader to surface "which
+// section am I in right now" for the header chapter title and the TOC
+// active highlight — many EPUBs ship multiple sections per file, so a
+// single chapterId maps to several TOC entries and the title alone
+// can't tell us which entry is active.
+//
+// Returns the trimmed text content of the heading, or null if none
+// is found (no headings, or the topmost paragraph is before all of
+// them). Empty headings are ignored.
+//
+// "Closest preceding" means: the heading element whose top edge is
+// at or above the topmost visible paragraph's top edge, and is the
+// LAST such heading in document order. We use bounding rects so it
+// works in both paginated (post-transform geometry) and scroll modes.
+export function closestPrecedingHeading(root: HTMLElement): string | null {
+  const headings = Array.from(
+    root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'),
+  );
+  if (headings.length === 0) return null;
+
+  const paragraphs = collectParagraphs(root);
+  // Decide the "current viewing y": the top of the first visible
+  // paragraph, or just 0 if nothing is visible.
+  let currentTop = 0;
+  let foundVisible = false;
+  for (const p of paragraphs) {
+    const rect = p.el.getBoundingClientRect();
+    if (rect.top >= 0 && rect.bottom > 0) {
+      currentTop = rect.top;
+      foundVisible = true;
+      break;
+    }
+  }
+  // If nothing is visible (e.g. chapter just loaded, scroll==0), fall
+  // back to the very first heading in the chapter — that's the section
+  // the reader is about to read.
+  if (!foundVisible) {
+    for (const h of headings) {
+      const t = (h.textContent ?? '').trim();
+      if (t) return t;
+    }
+    return null;
+  }
+
+  // Walk headings in document order; remember the LAST one whose top
+  // edge is at or above currentTop (with a small tolerance so a
+  // heading right at the page top counts).
+  let best: string | null = null;
+  for (const h of headings) {
+    const text = (h.textContent ?? '').trim();
+    if (!text) continue;
+    const top = h.getBoundingClientRect().top;
+    if (top <= currentTop + 4) {
+      best = text;
+    } else {
+      // Once a heading is past the current viewport top, the rest are
+      // also past — stop scanning.
+      break;
+    }
+  }
+  // If no heading precedes the current paragraph, return the FIRST
+  // heading. The reader is in the lead-in before that section — better
+  // to surface "this chapter starts with X" than show nothing.
+  if (best == null) {
+    for (const h of headings) {
+      const t = (h.textContent ?? '').trim();
+      if (t) return t;
+    }
+    return null;
+  }
+  return best;
+}
+
 // Scroll / page-flip the reader so the paragraph in `cfi` becomes
 // visible. Caller passes the scroll/page handler. Returns true if
 // we found the anchor and asked the caller to navigate.

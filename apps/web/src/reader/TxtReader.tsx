@@ -34,6 +34,8 @@ import {
   applyAllHighlights,
   clearHighlights,
   encodeLocatorFromRange,
+  highlightClassName,
+  locatorToRangeForHighlight,
   wrapRange,
 } from '../lib/annotations';
 import {
@@ -41,6 +43,7 @@ import {
   navigateToCFIv2,
   decodeLocatorAny,
   encodeLocatorV2,
+  closestPrecedingHeading,
   type CFIv2,
 } from '../lib/locator';
 import {
@@ -96,6 +99,14 @@ interface Props {
    *  TOC chapter changes — used by ReaderPage to drive the active
    *  TOC entry without it lagging behind page flips. */
   onActiveChapterChange?: (chapterId: string) => void;
+  /** Called with the trimmed text of the closest heading preceding
+   *  the topmost visible paragraph. ReaderPage uses this for two
+   *  things: (a) showing the current SECTION title in the header
+   *  (instead of the parser's auto-generated "第 X 章" placeholder),
+   *  and (b) matching against the TOC so the drawer's active entry
+   *  tracks the user's scroll position even when a single chapterId
+   *  maps to many TOC entries. */
+  onActiveHeadingText?: (heading: string | null) => void;
   /** Called with a 0..1 reading-progress estimate. Combines the
    *  current chapter's ord with the in-chapter page fraction so the
    *  hairline progress bar in the reader chrome moves smoothly even
@@ -116,7 +127,7 @@ interface Props {
 export default function TxtReader({
   bookId, prefs, chapterOrd, pageMode,
   onChapterChange, onReady, onBusy, onSelection,
-  styleColors, onProgressAnchor, onActiveChapterChange, onProgressPercent, initialAnchor,
+  styleColors, onProgressAnchor, onActiveChapterChange, onActiveHeadingText, onProgressPercent, initialAnchor,
   searchKeyword, searchTargetChapterId, onSearchHandled,
 }: Props) {
   const [chapters, setChapters] = useState<ChapterMeta[]>([]);
@@ -134,6 +145,15 @@ export default function TxtReader({
   const [tbMode, setTbMode] = useState<SelectionToolbarMode | null>(null);
   const [tbAnchor, setTbAnchor] = useState<DOMRect | null>(null);
   const [tbCurrent, setTbCurrent] = useState<Highlight | null>(null);
+  /** A snapshot of the user's selection at the moment the toolbar
+   *  opened. We capture this in addition to relying on
+   *  window.getSelection() at click time because some browsers /
+   *  themes collapse the selection on focus changes — including a
+   *  click on the toolbar — which made the apply step silently
+   *  abort with "no range" and is the most likely culprit for the
+   *  "annotations don't display" bug. With a stored range, the
+   *  apply path is robust regardless of selection lifecycle. */
+  const tbRangeRef = useRef<Range | null>(null);
   const readyFiredRef = useRef(false);
   const anchorRestoredRef = useRef(false);
 
@@ -192,20 +212,37 @@ export default function TxtReader({
 
   const html = useMemo(() => {
     if (!body) return '';
-    if (body.html && body.html.trim()) return body.html;
-    if (body.text) {
-      const escaped = body.text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-      return escaped.split(/\n\s*\n+/).map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`).join('');
-    }
-    return '';
+    const raw = body.html && body.html.trim()
+      ? body.html
+      : (body.text
+        ? body.text
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .split(/\n\s*\n+/)
+          .map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`)
+          .join('')
+        : '');
+    return cleanLeadingWhitespace(raw);
   }, [body]);
 
   // After the chapter content paints, apply saved highlights and
   // recompute pagination metrics. useLayoutEffect so we measure
   // before the user sees any flash.
+  //
+  // Important separation from the previous version: this effect runs
+  // on chapter / layout-affecting prefs changes ONLY, not on every
+  // highlight or note state mutation. The reason is that earlier the
+  // effect would clear all annotation spans and re-wrap from the
+  // saved locator on every state change — including the state change
+  // that happened immediately after the user applied a highlight. If
+  // the locator-decode failed for the brand-new highlight (e.g. the
+  // CFIv2 paragraph hash didn't match because of font-load reflow),
+  // the manually-wrapped span got stripped on the very next render
+  // and the user saw nothing. We now do the bulk apply on chapter
+  // boundaries only, and a SEPARATE effect handles incremental
+  // additions (see below) using targeted DOM updates that never
+  // remove an existing span.
   useLayoutEffect(() => {
     const root = proseRef.current;
     if (!root || !body) return;
@@ -263,7 +300,62 @@ export default function TxtReader({
       onReady?.();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [html, body, highlights, notes, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth]);
+  }, [html, body, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth]);
+
+  // Incremental annotation sync — runs whenever the highlights/notes
+  // arrays change (without re-running the heavy layout pass above).
+  // For each row in state we:
+  //   • If a span with matching data-hl-id already exists, we just
+  //     update its has-note class so toggling a note doesn't flicker.
+  //   • If no span exists, we resolve the locator and wrap the range.
+  // For each span in the DOM whose data-hl-id is no longer in state
+  // (the user deleted it), we unwrap it.
+  // The effect deliberately does NOT touch spans that ARE in state —
+  // a manually-wrapped highlight from onApplyHighlight stays intact
+  // even if its locator would otherwise have failed to decode here.
+  useEffect(() => {
+    const root = proseRef.current;
+    if (!root || !body) return;
+    const notedSet = new Set(
+      notes.filter(n => n.highlightId).map(n => n.highlightId as string),
+    );
+    const wantById = new Map<string, typeof highlights[number]>();
+    for (const h of highlights) {
+      if (!h.chapterId || h.chapterId === body.id) wantById.set(h.id, h);
+    }
+    // Update existing / add missing.
+    for (const [id, h] of wantById) {
+      const existingSpans = root.querySelectorAll<HTMLSpanElement>(
+        `span[data-hl-id="${cssEscape(id)}"]`,
+      );
+      if (existingSpans.length > 0) {
+        const cls = highlightClassName(h, notedSet.has(id));
+        existingSpans.forEach(s => {
+          if (s.className !== cls) s.className = cls;
+          if (notedSet.has(id)) s.setAttribute('data-has-note', '1');
+          else s.removeAttribute('data-has-note');
+        });
+        continue;
+      }
+      // Missing — try to wrap from locator.
+      const range = locatorToRangeForHighlight(root, h);
+      if (range) {
+        try { wrapRange(range, h, notedSet.has(id)); } catch { /* ignore */ }
+      }
+    }
+    // Remove orphan spans (highlight deleted from state).
+    const allSpans = root.querySelectorAll<HTMLSpanElement>('span[data-hl-id]');
+    allSpans.forEach(s => {
+      const id = s.getAttribute('data-hl-id');
+      if (!id || !wantById.has(id)) {
+        const parent = s.parentNode;
+        if (!parent) return;
+        while (s.firstChild) parent.insertBefore(s.firstChild, s);
+        parent.removeChild(s);
+      }
+    });
+    root.normalize();
+  }, [highlights, notes, body]);
 
   // Recompute pagination on resize so layout changes don't strand the
   // user mid-page. We use ResizeObserver instead of just `resize` on
@@ -334,8 +426,9 @@ export default function TxtReader({
 
   // ── Progress emit ───────────────────────────────────────────────
   // When the user flips a page (paginated) or scrolls (scroll mode),
-  // report a CFIv2 anchor for the topmost visible paragraph. Throttled
-  // so rapid page-flips don't spam the parent.
+  // report a CFIv2 anchor for the topmost visible paragraph AND the
+  // current section heading text. Throttled so rapid page-flips don't
+  // spam the parent.
   useEffect(() => {
     if (!body) return;
     const root = proseRef.current;
@@ -347,12 +440,16 @@ export default function TxtReader({
       const anchor = topVisibleAnchor(r, body.id);
       if (!anchor) {
         onProgressAnchor?.(null);
-        return;
+      } else {
+        onProgressAnchor?.({
+          chapterId: body.id,
+          locator: encodeLocatorV2(anchor),
+        });
       }
-      onProgressAnchor?.({
-        chapterId: body.id,
-        locator: encodeLocatorV2(anchor),
-      });
+      // Section heading — null if no heading or the chapter has none.
+      // The parent dedupes, so emitting the same value repeatedly is
+      // free.
+      onActiveHeadingText?.(closestPrecedingHeading(r));
     };
 
     if (pageMode === 'paginated') {
@@ -529,6 +626,7 @@ export default function TxtReader({
         if (sel && sel.toString() === '' && tbMode === 'create') {
           setTbMode(null);
           setTbAnchor(null);
+          tbRangeRef.current = null;
           onSelection?.(null);
         }
         return;
@@ -540,6 +638,9 @@ export default function TxtReader({
       if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
       const rect = range.getBoundingClientRect();
       if (rect.width < 1 && rect.height < 1) return;
+      // Snapshot the range so the apply path doesn't depend on the
+      // selection still being alive when the user clicks a chip.
+      tbRangeRef.current = range.cloneRange();
       setTbCurrent(null);
       setTbMode('create');
       setTbAnchor(rect);
@@ -575,10 +676,17 @@ export default function TxtReader({
   const onApplyHighlight = useCallback(async (style: HighlightStyle, color: HighlightColor) => {
     const root = proseRef.current;
     if (!root || !body) return;
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
-    const range = sel.getRangeAt(0);
-    if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
+    // Prefer the snapshot we took when the toolbar opened — the live
+    // selection may have been collapsed by the click on the toolbar
+    // chip itself, and on some browsers the preventDefault on the
+    // toolbar's mousedown isn't enough to keep the caret pinned.
+    let range: Range | null = tbRangeRef.current;
+    if (!range || !root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      range = sel.getRangeAt(0);
+      if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
+    }
     const text = range.toString();
     if (!text || text.trim().length === 0) return;
     const locator = encodeLocatorFromRange(root, body.id, range);
@@ -593,12 +701,17 @@ export default function TxtReader({
         style,
       });
       // Wrap the live range immediately so the user sees the result
-      // without waiting for the next chapter re-render.
+      // without waiting for the next chapter re-render. The
+      // incremental-sync useEffect won't strip our new span — it sees
+      // a span whose data-hl-id is in `highlights` state and leaves
+      // it alone.
       try {
         wrapRange(range.cloneRange(), created, false);
-      } catch { /* re-render fallback in next setHighlights tick */ }
+      } catch { /* the incremental effect will retry from locator */ }
       setHighlights(prev => [...prev, created]);
-      sel.removeAllRanges();
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      tbRangeRef.current = null;
       setTbMode(null);
       setTbAnchor(null);
       onSelection?.(null);
@@ -743,12 +856,16 @@ export default function TxtReader({
     }
 
     // Path B: brand-new note from a fresh selection. We create both a
-    // highlight (using the highlight-style colour from styleColors —
-    // notes are bound to a highlight visually) and a note linked to it.
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
-    const range = sel.getRangeAt(0);
-    if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
+    // highlight (using styleColors.note — the user requested that
+    // notes have their own colour memory, separate from plain
+    // highlights) and a note linked to it.
+    let range: Range | null = tbRangeRef.current;
+    if (!range || !root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+      const sel0 = window.getSelection();
+      if (!sel0 || sel0.rangeCount === 0) return;
+      range = sel0.getRangeAt(0);
+      if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
+    }
     const txt = range.toString();
     if (!txt || txt.trim().length === 0) return;
     const locator = encodeLocatorFromRange(root, body.id, range);
@@ -758,7 +875,7 @@ export default function TxtReader({
         chapterId: body.id,
         locator,
         selectedText: txt,
-        color: styleColors.highlight,
+        color: styleColors.note,
         style: 'highlight',
       });
       const note = await createNote(bookId, {
@@ -772,8 +889,10 @@ export default function TxtReader({
       setNotes(prev => [...prev, note]);
       try {
         wrapRange(range.cloneRange(), hl, true);
-      } catch { /* fallthrough to next render */ }
-      sel.removeAllRanges();
+      } catch { /* incremental effect will retry */ }
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      tbRangeRef.current = null;
     } catch (e) {
       console.error('save note (new) failed', e);
     }
@@ -802,6 +921,7 @@ export default function TxtReader({
     setTbMode(null);
     setTbAnchor(null);
     setTbCurrent(null);
+    tbRangeRef.current = null;
   }, []);
 
   // ── Render ──────────────────────────────────────────────────────
@@ -1010,6 +1130,96 @@ function ChapterFooter({
       </button>
     </div>
   );
+}
+
+// ── HTML normalisation ────────────────────────────────────────────
+//
+// `cleanLeadingWhitespace` walks the chapter HTML once before render
+// and:
+//   1. Strips leading <br>, empty <p>, empty <div> elements.
+//   2. Removes top-margin / top-padding inline styles from whatever
+//      element ends up first.
+//
+// We use the browser's DOMParser rather than regex string-mangling
+// because chapter HTML has nested tags we don't want to misinterpret
+// (e.g. `<p>foo<br/>` shouldn't have its <br> stripped). DOMParser is
+// available in every browser our SPA targets and is sandboxed (no
+// scripts run, no resource fetches).
+function cleanLeadingWhitespace(rawHtml: string): string {
+  if (!rawHtml) return rawHtml;
+  let doc: Document;
+  try {
+    // Wrap in a body so DOMParser doesn't synthesise its own.
+    doc = new DOMParser().parseFromString(
+      `<!doctype html><body><div id="__root__">${rawHtml}</div></body>`,
+      'text/html',
+    );
+  } catch {
+    return rawHtml;
+  }
+  const container = doc.getElementById('__root__');
+  if (!container) return rawHtml;
+
+  // Strip leading empties. "Empty" = no non-whitespace text and no
+  // descendants that introduce visible content (img, table, etc.).
+  while (container.firstChild) {
+    const node = container.firstChild;
+    if (node.nodeType === Node.TEXT_NODE) {
+      if ((node.textContent ?? '').trim() === '') {
+        container.removeChild(node);
+        continue;
+      }
+      break;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      container.removeChild(node);
+      continue;
+    }
+    const el = node as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'br' || tag === 'hr') {
+      container.removeChild(el);
+      continue;
+    }
+    const txt = (el.textContent ?? '').trim();
+    const hasMedia = !!el.querySelector('img, svg, picture, video, audio, table, figure');
+    if (!txt && !hasMedia) {
+      container.removeChild(el);
+      continue;
+    }
+    break;
+  }
+
+  // Cap top-margin / padding-top on the first element so an inline
+  // `margin-top: 6em` doesn't push the heading down half a page.
+  const first = container.firstElementChild as HTMLElement | null;
+  if (first) {
+    const style = first.getAttribute('style');
+    if (style) {
+      const cleaned = style
+        .replace(/(^|;)\s*margin-top\s*:[^;]*;?/gi, ';')
+        .replace(/(^|;)\s*padding-top\s*:[^;]*;?/gi, ';')
+        .replace(/(^|;)\s*margin\s*:[^;]*;?/gi, ';')
+        .replace(/^\s*;+/, '')
+        .trim();
+      if (cleaned) first.setAttribute('style', cleaned);
+      else first.removeAttribute('style');
+    }
+  }
+
+  return container.innerHTML;
+}
+
+// CSS.escape() with a manual fallback for environments that don't
+// expose it. We need this to safely use the highlight id in an
+// attribute selector — generated ids are mostly alphanumerics, but
+// the substring rule never returns a TRUE empty value, so the
+// fallback escapes anything that isn't a..z / 0..9 / underscore.
+function cssEscape(s: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(s);
+  }
+  return s.replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch);
 }
 
 // ── search-flash helpers ──────────────────────────────────────────────

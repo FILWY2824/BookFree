@@ -29,6 +29,14 @@ interface Props {
    *  activeChapterId in the parent. We accept the id directly (not
    *  an ord) so the drawer doesn't have to know chapter ordering. */
   activeChapterId: string | null;
+  /** Optional active TOC entry label. When the chapter file contains
+   *  multiple TOC sections the chapterId alone is ambiguous (every
+   *  section in the file matches). The parent resolves the user's
+   *  current section against the TOC and passes its label here so
+   *  exactly ONE row gets highlighted, tracking the user's scroll
+   *  position. When null, we fall back to the chapterId match,
+   *  highlighting whichever entry comes first in document order. */
+  activeLabel?: string | null;
   onPick: (chapterId: string) => void;
   /** Counter incremented by the parent whenever the user clicks the
    *  in-drawer "定位" button. We watch this with a ref and scroll
@@ -43,11 +51,32 @@ interface Props {
 }
 
 export default function TocDrawer({
-  items, activeChapterId, onPick, locateTick, onLocateRequest,
+  items, activeChapterId, activeLabel, onPick, locateTick, onLocateRequest,
 }: Props) {
   const flat = useMemo(() => flatten(items), [items]);
   const listRef = useRef<HTMLUListElement>(null);
   const activeRef = useRef<HTMLLIElement>(null);
+
+  // Decide which flat entry is "active". Prefer the most specific
+  // match available, falling back gracefully so the highlight is
+  // never lost just because a TOC label disagrees with a chapter
+  // title:
+  //   1. label-exact match (used when parent resolved a heading hit)
+  //   2. chapterId match
+  //   3. nothing (no row gets highlighted)
+  // We compute the index once so `activeRef` is attached to exactly
+  // one <li> — the locate button uses that ref to scrollIntoView.
+  const activeIdx = useMemo(() => {
+    if (activeLabel) {
+      const i = flat.findIndex(e => e.label === activeLabel);
+      if (i >= 0) return i;
+    }
+    if (activeChapterId) {
+      const i = flat.findIndex(e => e.chapterId === activeChapterId);
+      if (i >= 0) return i;
+    }
+    return -1;
+  }, [flat, activeChapterId, activeLabel]);
 
   // Scroll the active entry into view whenever the locate tick changes.
   useEffect(() => {
@@ -104,7 +133,7 @@ export default function TocDrawer({
           </li>
         )}
         {flat.map((entry, i) => {
-          const active = !!entry.chapterId && entry.chapterId === activeChapterId;
+          const active = i === activeIdx;
           const clickable = !!entry.chapterId;
           return (
             <li

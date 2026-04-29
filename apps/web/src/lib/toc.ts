@@ -52,3 +52,51 @@ export function findTocItemByChapterId(items: TocItem[], chapterId: string): Toc
   }
   return null;
 }
+
+/** Walk the tree depth-first and return the first item whose label
+ *  contains or equals the given heading text. Used to match a section
+ *  heading detected in the chapter DOM ("2.3.8 小结") against a TOC
+ *  entry so the drawer's active-chapter highlight tracks the user's
+ *  scroll position even when a single chapterId maps to many entries.
+ *
+ *  Matching is intentionally fuzzy: TOC labels often have leading
+ *  numbering ("2.3.8 小结") that matches the heading exactly, but
+ *  some EPUBs strip or rewrite numbering, so we accept either:
+ *    • exact equal (whitespace-collapsed)
+ *    • TOC label CONTAINS heading text (e.g. "2.3.8 小结 (节录)" vs "小结")
+ *    • heading text CONTAINS TOC label (e.g. "Chapter 2 — 小结" vs "小结")
+ */
+export function findTocItemByHeading(items: TocItem[], heading: string): TocItem | null {
+  const needle = collapseSpaces(heading);
+  if (!needle) return null;
+  // Try exact match first to avoid spurious substring hits — "1" would
+  // otherwise match every TOC entry containing the digit.
+  const exact = walk(items, lbl => collapseSpaces(lbl) === needle);
+  if (exact) return exact;
+  // Then look for a TOC label whose collapsed form starts with the
+  // heading (the common case: heading "2.3.8 小结" matches TOC entry
+  // "2.3.8 小结").
+  const startsWith = walk(items, lbl => collapseSpaces(lbl).startsWith(needle));
+  if (startsWith) return startsWith;
+  // Final fallback — bidirectional substring. Keep this last; it's
+  // the most permissive and most likely to false-positive.
+  return walk(items, lbl => {
+    const c = collapseSpaces(lbl);
+    return c.includes(needle) || needle.includes(c);
+  });
+}
+
+function walk(items: TocItem[], pred: (label: string) => boolean): TocItem | null {
+  for (const it of items) {
+    if (pred(it.label)) return it;
+    if (it.children && it.children.length) {
+      const sub = walk(it.children, pred);
+      if (sub) return sub;
+    }
+  }
+  return null;
+}
+
+function collapseSpaces(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
