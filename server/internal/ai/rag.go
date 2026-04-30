@@ -1,3 +1,10 @@
+// 中文导读：
+// rag.go 负责 RAG（检索增强生成）相关逻辑。
+// 简单理解：用户向某本书提问时，系统先从书籍内容中检索相关片段，再把片段和问题一起发给 AI。
+// 这样 AI 回答更贴近书籍内容，而不是凭空编造。
+// RAG 容易带来内存压力，因为涉及文本切片、检索结果、上下文拼接。
+// BookFree 的实现应优先按需查询、限制片段数量、避免常驻大索引，符合 50MB 常驻内存目标。
+
 // RAG retrieval for the streaming chat endpoint.
 //
 // Pipeline (per the user's chosen "FTS5 + lightweight local embedding

@@ -1,3 +1,12 @@
+/*
+中文导读：
+themes.ts 定义阅读器主题，例如浅色、护眼、深色等。
+主题配置通常会包含背景色、文字色、边框色、强调色等前端样式值。
+阅读器设置面板会读取这些主题，让用户切换阅读体验。
+如果你想新增一个主题，通常在这里增加配置，再确认 SettingsDrawer/ReaderPage 是否会自动展示。
+这里不应该写后端请求；主题属于前端展示偏好。
+*/
+
 // Reader theme registry. Mirrors the eight CSS-variable blocks in
 // styles.css. The picker reads `swatchBg` / `swatchFg` to render a
 // little chip without having to mount an iframe.

@@ -1,3 +1,12 @@
+/*
+中文导读：
+SelectionToolbar 是阅读器中文字选中后的浮动工具栏。
+用户选中一段文字后，可能会看到“高亮、写笔记、复制、问 AI、解释”等操作入口。
+这个组件主要负责根据选区位置显示工具栏，并把按钮点击传给上层逻辑。
+它不应该直接保存笔记或调用所有业务接口，而应通过 props 回调让 ReaderPage 或相关模块处理。
+如果你想新增“选中文本后问 AI”或“添加到摘录”的按钮，通常会改这里和上层回调。
+*/
+
 // SelectionToolbar — the small popover that appears next to the
 // user's selection (or next to an existing annotation when they click
 // it in edit mode).

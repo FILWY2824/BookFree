@@ -1,3 +1,12 @@
+/*
+中文导读：
+StatsPage 是阅读统计页面，用于展示书籍数量、阅读进度、笔记数量、总容量等概览信息。
+它通常从后端 API 拉取统计数据，然后以卡片或图表形式展示。
+统计页不应该承载复杂业务写入逻辑，更多是“读取数据并展示”。
+如果你想新增一个统计指标，需要同时考虑：后端是否提供该字段、前端类型是否包含该字段、页面是否展示该字段。
+如果统计结果不准确，优先检查后端统计查询，再检查这里的展示逻辑。
+*/
+
 // 阅读统计 — overview page modelled on the ReadAny project's stats
 // dashboard the user pointed us to. Layout: a row of headline cards
 // (total books / total annotations / total reading time / current

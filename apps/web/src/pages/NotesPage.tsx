@@ -1,18 +1,37 @@
-// "标注与笔记" page. Cross-library feed of every annotation the user
-// created while reading: text-only notes, plus four highlight styles
-// (highlight / underline / wavy / strike-through). The reader's
-// SelectionToolbar can produce any of these, and they all live as
-// rows in highlights or notes — this page hydrates both endpoints and
-// joins them by `locator` so a highlight that has an attached note
-// shows up as a single card with both pieces.
+// “标注与笔记”页面：展示当前用户在所有书籍里创建过的标注、高亮、下划线、
+// 波浪线、删除线和纯文本笔记。
 //
-// We also accept filters:
-//   • all kinds vs one of {note, highlight, underline, wavy, strike}
-//   • all books vs a single bookId
+// 对初学者来说，可以把这个页面理解为一个“跨书籍的阅读痕迹时间线”：
+//   1. 从后端 `/api/notes` 拉取所有笔记；
+//   2. 从后端 `/api/highlights` 拉取所有标注；
+//   3. 在前端合并成统一的 Card 数组；
+//   4. 按更新时间倒序展示；
+//   5. 允许按“类型”和“书籍”筛选。
 //
-// The book filter pulls its options from the highlights+notes data
-// itself rather than calling /api/books — only books with annotations
-// are useful here.
+// 与阅读器的关系：
+//   用户在 TxtReader 中选中文本后，SelectionToolbar 可以创建：
+//   - highlight：普通高亮；
+//   - underline：下划线；
+//   - wavy：波浪线；
+//   - strike：删除线；
+//   - note：笔记。
+//   这些数据最终由 `server/internal/notes/handlers.go` 写入 SQLite。
+//   本页只是把这些已经保存的阅读痕迹集中展示出来。
+//
+// 为什么 notes 和 highlights 要分开请求：
+//   后端表结构把“视觉标注”和“文字笔记正文”拆成两类数据：
+//   - highlights 表保存被选中的文本、颜色、样式、定位 locator；
+//   - notes 表保存用户写下的笔记正文。
+//   拆开后，纯高亮不必创建空笔记，纯笔记也能独立存在。
+//   前端页面再把两类数据合并成统一卡片，方便用户浏览。
+//
+// 书籍筛选为什么不单独调用 `/api/books`：
+//   本页只需要“有标注/笔记的书”。如果直接列出所有书，用户会看到大量无关选项。
+//   因此书籍筛选项直接从 cards 中提取，既减少一次 API 请求，也让筛选更聚焦。
+//
+// 与低内存约束的关系：
+//   本页不在前端或后端维护常驻索引，只按需读取 SQLite 中当前用户的标注/笔记小行数据。
+//   标注通常是小文本，内存压力远小于整本书正文或全文索引。
 
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -21,6 +40,12 @@ import DashboardChrome from '../components/DashboardChrome';
 import { formatRelative } from '../lib/format';
 import type { HighlightColor, HighlightStyle } from '../lib/highlights';
 
+/**
+ * 后端 `/api/notes` 返回的一条笔记。
+ *
+ * selectedText 是用户创建笔记时选中的原文片段；
+ * body 是用户自己写下的笔记正文。
+ */
 interface NoteRow {
   id: string;
   bookId: string;
@@ -31,6 +56,12 @@ interface NoteRow {
   updatedAt: number;
 }
 
+/**
+ * 后端 `/api/highlights` 返回的一条视觉标注。
+ *
+ * locator 是关键字段：它不是页面坐标，而是一种稳定文本定位字符串，
+ * 用来在重新打开章节时把标注重新放回原文位置。
+ */
 interface HighlightRow {
   id: string;
   bookId: string;
@@ -42,7 +73,14 @@ interface HighlightRow {
   updatedAt: number;
 }
 
-// Unified card shape after merging notes and highlights.
+/**
+ * 页面内部统一使用的卡片结构。
+ *
+ * 为什么需要 Card：
+ *   notes 和 highlights 来自两个接口、字段也不完全相同。
+ *   如果 JSX 里直接分别处理两种结构，页面会有大量重复逻辑。
+ *   先合并成 Card，再统一渲染，代码更容易读，也方便后续加筛选/排序。
+ */
 interface Card {
   key: string;
   bookId: string;
@@ -54,8 +92,10 @@ interface Card {
   updatedAt: number;
 }
 
+/** 筛选类型：all 表示不过滤，其他值表示只看某一种标注/笔记。 */
 type KindFilter = 'all' | 'note' | HighlightStyle;
 
+/** 类型到中文标签的映射，集中放在这里，避免 JSX 中到处写硬编码中文。 */
 const KIND_LABELS: Record<KindFilter, string> = {
   all: '全部',
   note: '笔记',
@@ -65,6 +105,7 @@ const KIND_LABELS: Record<KindFilter, string> = {
   strike: '删除线',
 };
 
+/** 筛选按钮的展示顺序。 */
 const KIND_ORDER: KindFilter[] = ['all', 'note', 'highlight', 'underline', 'wavy', 'strike'];
 
 export default function NotesPage() {
@@ -75,14 +116,21 @@ export default function NotesPage() {
   const [kind, setKind] = useState<KindFilter>('all');
   const [bookFilter, setBookFilter] = useState<string>('all');
 
+  // 首次进入页面时并行加载 notes 和 highlights。
+  //
+  // Promise.all 的含义：
+  //   两个请求同时发出，等它们都完成后再进入 then。
+  //   这样比先请求 notes、再请求 highlights 更快。
+  //
+  // cancelled 标记用于避免“组件已经卸载，但异步请求回来后仍然 setState”的问题。
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     Promise.all([
       api.get<{ notes: NoteRow[] }>('/api/notes'),
-      // /api/highlights was added alongside this page; if a user is
-      // running an older server build, swallow the 404 and continue
-      // with notes only.
+      // /api/highlights 是后续新增的接口。
+      // 如果用户运行的是旧服务端，可能返回 404；这里吞掉错误并用空数组兜底，
+      // 这样至少笔记列表还能显示，不会因为一个兼容性问题导致整个页面不可用。
       api.get<{ highlights: HighlightRow[] }>('/api/highlights')
         .catch(() => ({ highlights: [] as HighlightRow[] })),
     ])
@@ -96,9 +144,12 @@ export default function NotesPage() {
     return () => { cancelled = true; };
   }, []);
 
-  // Merge notes and highlights into a single sorted list. We don't try
-  // to dedupe by locator yet — a highlight + an attached note are two
-  // rows here, which matches how the reader stored them.
+  // 把 notes 和 highlights 合并成统一卡片列表，并按更新时间倒序排列。
+  //
+  // 当前没有按 locator 去重：
+  //   如果一段文本既有高亮又有关联笔记，这里会显示为两条记录。
+  //   这与当前阅读器的保存方式一致，也能让用户分别看到“标注动作”和“笔记内容”。
+  //   未来如果希望合并成一张卡，可以在这里按 bookId + locator 做聚合。
   const cards: Card[] = useMemo(() => {
     const out: Card[] = [];
     for (const n of notes) {
@@ -127,8 +178,11 @@ export default function NotesPage() {
     return out;
   }, [notes, highlights]);
 
-  // Distinct books appearing in the merged feed, used to populate the
-  // filter dropdown. Sorted alphabetically by title.
+  // 从合并后的 cards 中提取出现过的书籍，作为“书籍筛选”下拉框选项。
+  //
+  // Map 的作用：
+  //   以 bookId 为 key，可以自然去重；同一本书出现多条笔记/标注，也只显示一次。
+  // localeCompare(..., 'zh-Hans-CN') 让中文标题排序更符合中文环境。
   const books = useMemo(() => {
     const seen = new Map<string, string>();
     for (const c of cards) seen.set(c.bookId, c.bookTitle);
@@ -136,14 +190,16 @@ export default function NotesPage() {
       .sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN'));
   }, [cards]);
 
+  // 根据当前筛选条件得到真正展示的列表。
+  // 注意这是纯前端筛选：数据量通常很小，不需要每次筛选都重新请求后端。
   const filtered = cards.filter(c => {
     if (kind !== 'all' && c.kind !== kind) return false;
     if (bookFilter !== 'all' && c.bookId !== bookFilter) return false;
     return true;
   });
 
-  // Counts per kind for the filter chip — gives the user a glance at
-  // how many of each they have without re-querying.
+  // 统计每种类型的数量，用于筛选按钮上的数字。
+  // 这些数字来自已经加载到页面的 cards，不会额外访问后端。
   const counts: Record<KindFilter, number> = {
     all: cards.length,
     note: 0, highlight: 0, underline: 0, wavy: 0, strike: 0,
@@ -211,6 +267,13 @@ export default function NotesPage() {
   );
 }
 
+/**
+ * 单张标注/笔记卡片。
+ *
+ * 点击卡片会进入对应书籍的阅读页。当前只跳到书籍级别 `/book/:id`；
+ * 如果未来要精确跳到标注位置，可以把 card 中补充 chapterId / locator，
+ * 然后在链接里带上查询参数，让 ReaderPage 调用 locator 定位。
+ */
 function CardView({ card }: { card: Card }) {
   const tagLabel = KIND_LABELS[card.kind];
   return (
@@ -253,12 +316,19 @@ function CardView({ card }: { card: Card }) {
   );
 }
 
+/**
+ * 左上角的小图标，用于快速区分笔记、高亮、下划线、波浪线、删除线。
+ *
+ * 这里不使用图片资源，而是用 CSS / SVG 画出来：
+ * - 依赖少；
+ * - 加载快；
+ * - 颜色可直接跟随标注颜色变化。
+ */
 function KindBadge({ kind, color }: { kind: Card['kind']; color?: HighlightColor }) {
   if (kind === 'note') {
     return <span className="inline-block w-2 h-2 rounded-full bg-accent" aria-hidden />;
   }
-  // For highlights, show a colored chip; for underline/wavy/strike, a
-  // line preview.
+  // 高亮显示色块；下划线/波浪线/删除线显示线条预览。
   const dot = color ? highlightSwatchColor(color) : '#d1c8b8';
   if (kind === 'highlight') {
     return <span className="inline-block w-3 h-3 rounded-sm" style={{ background: dot }} aria-hidden />;
@@ -279,6 +349,12 @@ function KindBadge({ kind, color }: { kind: Card['kind']; color?: HighlightColor
   return <span className="inline-block w-3 h-px" style={{ background: dot, marginTop: 6 }} aria-hidden />;
 }
 
+/**
+ * 把逻辑颜色名转换成实际 CSS 颜色。
+ *
+ * 后端只存储 'yellow' / 'red' 这样的稳定枚举值；
+ * 前端可以随时调整具体 rgba 视觉效果，而不需要迁移数据库。
+ */
 function highlightSwatchColor(c: HighlightColor): string {
   switch (c) {
     case 'yellow': return 'rgba(247, 215, 92, 0.45)';
@@ -291,6 +367,12 @@ function highlightSwatchColor(c: HighlightColor): string {
   }
 }
 
+/**
+ * 给选中文本预览添加对应的行内样式。
+ *
+ * 普通 highlight 的背景色在 CardView 的 style 中处理；
+ * underline / wavy / strike 更适合用 className 表达。
+ */
 function highlightInlineClass(kind: Card['kind'], color?: HighlightColor): string {
   if (kind === 'underline') return 'underline decoration-2 underline-offset-2';
   if (kind === 'wavy') return 'underline decoration-wavy underline-offset-2';
@@ -299,6 +381,7 @@ function highlightInlineClass(kind: Card['kind'], color?: HighlightColor): strin
   return '';
 }
 
+/** 简单截断长文本，避免一条很长的摘录把整个列表撑得过高。 */
 function truncateText(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max) + '…';

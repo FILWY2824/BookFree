@@ -1,3 +1,9 @@
+// 中文导读：
+// sse.go 处理 Server-Sent Events，也就是后端向浏览器持续推送文本流。
+// AI 流式回答常用 SSE：模型每生成一小段，后端就推给前端，前端实时显示。
+// SSE 比 WebSocket 更简单，适合单向流式输出；对低内存服务也更轻量。
+// 修改这里要注意：连接断开要及时退出，不能留下 goroutine；写入失败要返回错误；不要缓存完整大响应。
+
 // SSE (Server-Sent Events) framing helpers for the streaming chat
 // endpoint. SSE is dirt-simple — `event: name\ndata: payload\n\n` —
 // but getting the headers and flushing right matters: without the

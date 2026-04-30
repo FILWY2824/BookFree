@@ -1,3 +1,12 @@
+/*
+中文导读：
+BlockingModal 是一种阻塞式弹窗，用于展示必须等待或必须处理的状态。
+和 Toast 不同，BlockingModal 会覆盖页面并阻止用户继续操作，适合上传解析中、重要确认中或不可恢复错误提示。
+这个组件应保持简单，只负责展示遮罩、标题、说明、按钮或 loading 状态。
+如果你想改全局遮罩样式、居中弹窗样式、按钮排列，优先看这里。
+如果你只想改某个阻塞弹窗的业务文案，通常去调用它的页面里改 props。
+*/
+
 // BlockingModal — a centered card with a spinner and a label that
 // blocks all interaction with the reader underneath. We use it for
 // two scenarios:

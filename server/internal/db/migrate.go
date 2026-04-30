@@ -1,3 +1,10 @@
+// 中文导读：
+// migrate.go 是数据库迁移执行器。
+// BookFree 使用 SQLite，表结构变化通过 server/internal/db/migrations 下的一系列 SQL 文件管理。
+// 迁移的目标是：老版本数据库升级到新版本时，自动按顺序执行还没执行过的 SQL。
+// 不要直接在生产库手动改表而不写迁移，否则其他环境无法复现。
+// 如果你新增字段或表，应新增一个编号递增的 migration 文件，并确保 migrate.go 能执行到它。
+
 package db
 
 import (

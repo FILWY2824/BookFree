@@ -1,3 +1,10 @@
+// 中文导读：
+// storage.go 定义文件存储抽象接口。
+// 业务代码不应该强依赖“文件一定存在本地磁盘”，而应该依赖这个接口。
+// 当前实现是本地存储，未来如果要支持 S3、WebDAV、对象存储，可以新增实现而尽量不改 handler。
+// 这种接口边界也方便未来 Android 端复用同一套后端 API。
+// 注意低内存约束：存储接口应优先流式读写，不要一次性把大书籍读进内存。
+
 // Package storage abstracts where book files live. The migration plan
 // §7.5 requires Range support for the PDF reader and a key prefix of
 // `users/<user_id>/books/<book_id>/...` enforced by trigger 0014.

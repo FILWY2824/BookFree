@@ -1,3 +1,11 @@
+/*
+中文导读：
+format.ts 放一些纯格式化工具函数，例如把字节数显示成 KB/MB、把时间戳显示成人类可读文本。
+这类函数应该保持“输入什么，输出什么”，不要在里面请求后端或修改全局状态。
+页面和组件可以复用这些函数，避免每个地方都重复写格式化逻辑。
+如果你发现多个页面的日期、文件大小、百分比显示不一致，优先把规则统一到这里。
+*/
+
 // Tiny formatters reused across pages.
 
 export function formatBytes(n: number): string {

@@ -1,3 +1,10 @@
+// 中文导读：
+// logger.go 是后端的轻量日志模块。
+// 项目没有默认引入重量级日志框架，而是用小而可控的封装输出结构化日志。
+// 日志用于定位线上问题，但不能记录密码、session、AI Key、数据库 token 等敏感信息。
+// 如果你新增关键业务流程，例如上传解析、AI 调用、全文索引，可以适当加 info/warn/error 日志。
+// 注意：过多 debug 日志会增加 IO 和噪音，生产环境应通过日志级别控制。
+
 // Package logger provides a tiny structured logger writing JSON to stderr.
 //
 // We deliberately avoid pulling in zap/zerolog/slog adapters: a single

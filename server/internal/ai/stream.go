@@ -1,3 +1,9 @@
+// 中文导读：
+// stream.go 负责 AI 流式调用的组织逻辑。
+// 它通常连接三部分：前端请求、Provider 流式响应、SSE 输出。
+// 好的流式实现应该边收边发，不要等模型完整回答后再一次性返回，这样用户体验更好，内存占用也更低。
+// 如果你发现 AI 回答不能实时显示、取消后仍在后台跑、内存上涨，可以重点检查这里。
+
 // Streaming chat handler. Owns the SSE response lifecycle for
 // /api/ai/chat?stream=true.
 //

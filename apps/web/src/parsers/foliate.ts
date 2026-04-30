@@ -1,3 +1,11 @@
+/*
+中文导读：
+foliate.ts 封装 foliate-js 相关逻辑，主要服务 EPUB 等电子书格式在浏览器里的解析和渲染。
+Foliate 是外部库，所以这个文件相当于“适配层”：把外部库复杂 API 包装成 BookFree 自己更稳定的调用方式。
+这样做的好处是：如果将来换 EPUB 渲染库，只需要尽量改适配层，不用让 ReaderPage 到处跟着改。
+这里可能包含较多异步加载、章节定位、资源读取逻辑，修改时要注意浏览器兼容性和内存释放。
+*/
+
 // Unified parser that delegates to foliate-js for every format
 // (https://github.com/johnfactotum/foliate-js, MIT). foliate-js powers
 // the Foliate desktop reader, so its parsers handle the things we

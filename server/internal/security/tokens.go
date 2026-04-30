@@ -1,3 +1,9 @@
+// 中文导读：
+// tokens.go 负责生成随机 token，例如 session token、一次性令牌或其他安全随机字符串。
+// 安全 token 必须使用 crypto/rand 这类密码学安全随机源，不能用 math/rand。
+// token 长度越短越容易被猜中；长度越长越安全但存储和传输略有成本。
+// 如果你新增登录态、邀请链接、邮箱验证等能力，通常会复用这里的 token 生成逻辑。
+
 package security
 
 import (

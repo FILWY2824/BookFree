@@ -1,3 +1,11 @@
+// 中文导读：
+// accounts.go 负责账号资料、用户设置或账号级别数据的后端逻辑。
+// 它和 auth 包的区别是：
+// - auth 更关注登录、注册、session、安全；
+// - accounts 更关注登录后的账号资料管理。
+// 如果你要增加用户昵称、头像、偏好设置、账号删除等功能，可能会涉及这个文件。
+// 所有账号相关接口都要注意多用户隔离：用户只能看到和修改自己的数据，管理员能力要显式判断。
+
 // Package accounts owns whole-account lifecycle operations — most
 // importantly, "delete this user and leave NO residue behind".
 //

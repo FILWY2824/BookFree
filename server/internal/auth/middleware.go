@@ -1,3 +1,9 @@
+// 中文导读：
+// auth/middleware.go 提供鉴权中间件。
+// 它会从 Cookie/session 中识别当前用户，并把用户信息放进 request context，供后续 handler 使用。
+// 需要登录的接口应该通过这个中间件保护，否则未登录用户也能访问私人数据。
+// 如果你新增 /api 接口，要先判断它是否需要登录；涉及书籍、笔记、进度、AI 配置的接口通常都必须登录。
+
 package auth
 
 import (

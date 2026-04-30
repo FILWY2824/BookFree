@@ -1,3 +1,13 @@
+/*
+中文导读：
+vite.config.ts 是前端构建工具 Vite 的配置文件。
+开发时，Vite 负责启动前端开发服务器、热更新 React 页面、把 TypeScript/TSX 编译成浏览器能运行的 JavaScript。
+生产构建时，Vite 会把前端资源输出到 dist，之后 Go 后端可以把这些静态文件嵌入或托管。
+这里常见配置包括：React 插件、路径别名、开发服务器端口、代理到后端 API。
+如果你遇到“前端请求 /api 失败”或“开发服务器端口不对”，可以先看这个文件。
+注意：不要在这里写业务逻辑，它只负责构建和开发服务器配置。
+*/
+
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 

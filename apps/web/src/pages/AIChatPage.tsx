@@ -1,3 +1,12 @@
+/*
+中文导读：
+AIChatPage 是独立的 AI 对话页面，用于让用户在不进入具体阅读器时也能访问 AI 能力。
+它通常会组合 AIChatPanel，并负责页面标题、布局、会话选择或全局上下文。
+和 ReaderPage 内的 AI 能力相比，这个页面更偏“全局 AI 助手”入口。
+如果你想调整 AI 页面整体布局、空状态、会话入口，优先看这里。
+如果你想改消息发送、流式响应、Provider 选择等底层行为，需要继续看 AIChatPanel 和 lib/ai.ts。
+*/
+
 // /ai — full-page AI conversation surface.
 //
 // Single-column layout. The previous version had a side-by-side

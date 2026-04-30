@@ -1,3 +1,12 @@
+/*
+中文导读：
+SettingsDrawer 是阅读设置抽屉，负责调整主题、字号、行高、字体、栏宽等阅读偏好。
+它通常读写 prefs.ts 中定义的本地偏好，并把变化传给 ReaderPage 或具体 reader。
+这个组件偏 UI 控制，不应该关心书籍解析和后端章节查询。
+如果你想新增阅读设置项，例如段落间距、背景纹理、自动翻页速度，通常要改这里、prefs.ts 和主题/reader 样式。
+设置类功能要注意持久化，否则用户刷新后会丢失。
+*/
+
 // Reader settings drawer — slides in from the right. Modifies prefs
 // in real time so the reader updates as you adjust controls.
 //

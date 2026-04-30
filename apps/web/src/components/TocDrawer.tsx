@@ -1,3 +1,12 @@
+/*
+中文导读：
+TocDrawer 是阅读器中的“目录抽屉”组件，用于展示一本书的章节目录并支持跳转。
+它通常接收章节列表、当前章节位置、关闭回调和章节点击回调。
+这个组件只负责目录 UI 和用户点击，不应该自己去解析书籍或请求章节正文。
+如果你想改目录层级缩进、当前章节高亮、抽屉打开/关闭样式，优先看这里。
+如果你想改变目录数据从哪里来，需要去 ReaderPage、后端 chapters 接口或具体 parser 中查看。
+*/
+
 // Table-of-contents drawer — permanently docked.
 //
 // Rewrite (per Round-3 user feedback):

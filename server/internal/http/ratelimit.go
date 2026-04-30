@@ -1,3 +1,10 @@
+// 中文导读：
+// ratelimit.go 是轻量限流实现。
+// 限流用于防止登录爆破、接口滥用或意外高频请求把小内存服务打爆。
+// BookFree 当前目标是单体低内存，因此默认不引入 Redis 这类额外常驻服务，而是在进程内做简单限流。
+// 这种方式部署简单、内存可控，但多实例部署时每个实例各自计数。
+// 如果未来要横向扩容，再考虑外部限流组件或网关限流。
+
 package httpsrv
 
 import (
@@ -23,11 +30,11 @@ import (
 // even at hundreds of req/s this is invisible compared to disk and
 // bcrypt cost.
 type rateLimiter struct {
-	mu       sync.Mutex
-	buckets  map[string]*bucket
-	max      float64
-	refill   float64 // tokens per second
-	lastSwp  time.Time
+	mu      sync.Mutex
+	buckets map[string]*bucket
+	max     float64
+	refill  float64 // tokens per second
+	lastSwp time.Time
 }
 
 type bucket struct {

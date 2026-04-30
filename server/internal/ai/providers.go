@@ -1,3 +1,9 @@
+// 中文导读：
+// providers.go 管理不同 AI Provider 的配置和调用适配。
+// BookFree 不应该和某一家模型供应商强绑定，因此这里会把 OpenAI 兼容接口、不同 base_url、模型名、密钥等抽象起来。
+// Provider 密钥属于敏感信息，保存前应加密，返回给前端时也不能泄露明文。
+// 如果你要新增一个模型供应商，优先在这里实现适配，并保持上层 handler 的接口稳定。
+
 // Custom AI provider profiles — let the user import their own
 // OpenAI-compatible endpoint instead of going through the server's
 // built-in Anthropic-backed AI.

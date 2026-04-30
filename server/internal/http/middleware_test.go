@@ -70,11 +70,11 @@ func TestParseTrustedProxies_DropsInvalid(t *testing.T) {
 
 func TestValidRequestID(t *testing.T) {
 	cases := map[string]bool{
-		"":                    false,
-		"abc-123_v1.2":        true,
-		"line\nbreak":         false,
-		"semi;colon":          false,
-		"quote\"":             false,
+		"":                            false,
+		"abc-123_v1.2":                true,
+		"line\nbreak":                 false,
+		"semi;colon":                  false,
+		"quote\"":                     false,
 		"too-long-" + repeat("x", 80): false,
 	}
 	for in, want := range cases {

@@ -1,3 +1,12 @@
+/*
+中文导读：
+locator.ts 负责阅读位置定位相关逻辑。
+阅读器需要知道用户看到哪里、选中了哪段文字、下次打开要恢复到什么位置，这些都依赖 locator。
+不同格式的定位方式不一样：TXT 可以按章节和字符偏移，EPUB 可能依赖 CFI 或 spine，PDF 可能依赖页码。
+这个文件的目标是把位置描述转换成前端和后端都能保存、恢复、比较的结构。
+如果你要改阅读进度、书签、标注定位、跨设备同步，必须重点理解这里。
+*/
+
 // Stable text locators for highlights, notes, and reading progress.
 //
 // Why a custom format instead of EPUB CFI:

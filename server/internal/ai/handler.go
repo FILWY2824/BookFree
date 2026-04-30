@@ -1,3 +1,10 @@
+// 中文导读：
+// handler.go 是后端 AI HTTP 接口入口，负责接收前端请求、校验用户身份、读取书籍上下文、调用 Provider 并返回结果。
+// 它通常不会自己实现模型算法，而是组织限额、RAG、Provider、SSE 流式输出等模块协作。
+// 这里是 Web 前端和未来 Android 客户端都会调用的服务端边界，所以接口字段要尽量稳定。
+// 如果你新增 AI 功能，例如章节摘要、选中文本解释、读书卡片生成，通常会在这里新增或扩展 handler。
+// 注意低内存约束：handler 不应一次性加载整本书或缓存大模型响应，应尽量流式和按需查询。
+
 // Package ai exposes a minimal AI chat surface to the reader. The
 // reader can ask "explain this passage" / "summarise" / "translate"
 // kinds of questions about a selection.

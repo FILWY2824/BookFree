@@ -1,3 +1,12 @@
+/*
+中文导读：
+prefs.ts 负责前端阅读偏好的读取、保存和默认值。
+偏好包括主题、字号、行高、字体、栏宽等，这些属于用户体验配置。
+有些偏好可能只保存在浏览器 localStorage，有些未来可以同步到后端账号设置。
+这个文件的价值是集中管理偏好结构，避免不同组件各自发明字段名。
+如果你新增阅读设置项，应先在这里定义默认值、类型和读写逻辑，再接入 SettingsDrawer 和 reader。
+*/
+
 // Reader preferences persisted to localStorage.
 //
 // pageMode controls how a long body is divided up:

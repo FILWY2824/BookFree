@@ -1,3 +1,12 @@
+/*
+中文导读：
+ConfirmDialog 是一个通用的“确认弹窗”组件，常用于删除书籍、退出危险操作等场景。
+它不关心具体业务，只接收标题、说明文字、确认按钮文案、取消按钮文案和回调函数。
+这种写法属于前端组件复用：页面负责决定“什么时候弹出、确认后做什么”，弹窗组件只负责展示和触发事件。
+如果你以后想调整所有确认弹窗的样式、按钮颜色、遮罩层透明度，优先改这个文件。
+如果只想改某一个删除操作的文案，通常不改这里，而是去调用 ConfirmDialog 的页面里改 props。
+*/
+
 // Generic confirmation modal. We use it for delete operations.
 
 import { useEffect } from 'react';

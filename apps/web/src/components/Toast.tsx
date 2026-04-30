@@ -1,3 +1,12 @@
+/*
+中文导读：
+Toast 是全局轻提示组件，用于显示“上传成功、登录失败、保存完成”等短消息。
+它通常通过 ToastProvider 在应用顶层提供能力，页面里调用 toast.success/toast.error 等方法。
+Toast 的特点是：不打断用户操作，只在页面角落短暂显示。
+如果你想修改提示出现位置、颜色、自动消失时间、动画效果，优先看这个文件。
+如果只是想改某个业务提示文案，通常去调用 toast 的页面或 handler 里改。
+*/
+
 // Tiny toast system. We avoid bundling a notification library because
 // most of them carry animation deps we already cover with raw CSS.
 //

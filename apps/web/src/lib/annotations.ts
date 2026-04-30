@@ -1,3 +1,11 @@
+/*
+中文导读：
+annotations.ts 负责批注/标注相关的前端数据处理。
+“高亮”和“笔记”通常都可以理解为 annotation：它们绑定在书籍、章节、文本范围或阅读位置上。
+这个文件帮助阅读器把用户选择的位置转换成可保存、可恢复、可渲染的数据结构。
+如果你以后要做更多标注类型，例如下划线、波浪线、颜色标签、批注回复，可以优先理解这个文件。
+*/
+
 // Annotation rendering helpers shared by every reader that lets the
 // user highlight text. We solve four sub-problems here:
 //

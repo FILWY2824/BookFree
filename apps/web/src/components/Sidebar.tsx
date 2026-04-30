@@ -1,3 +1,14 @@
+/*
+中文导读：
+Sidebar 是登录后页面左侧导航栏，负责展示“书架、全文搜索、笔记、统计、设置、退出登录”等入口。
+它依赖 React Router 判断当前路径，从而给当前菜单项加高亮样式。
+它也会调用 auth.tsx 中的 logout 完成退出登录。
+如果你新增一个需要登录的页面，通常要同时做两件事：
+1. 在 App.tsx 中新增 Route；
+2. 在 Sidebar.tsx 中新增一个导航入口。
+如果你只改导航文案或图标，主要改这里的菜单配置。
+*/
+
 // Sidebar — fixed-width nav rail. Mirrors the reference design's
 // vertical column with logo, primary nav, and the user/sign-out at
 // the bottom. Active route gets the accent stripe + tinted bg.

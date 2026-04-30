@@ -1,3 +1,9 @@
+// 中文导读：
+// crypto.go 提供加密/解密等底层安全工具。
+// 它通常不会直接处理 HTTP 请求，而是被 AI Provider、配置存储等模块调用，用来保护敏感字段。
+// 安全代码要避免“自己发明算法”，应优先使用 Go 标准库成熟算法。
+// 如果你要改加密格式，需要考虑数据库中已经保存的旧密文如何迁移。
+
 // AES-256-GCM with the exact envelope the Next.js code emitted:
 //
 //	"v1:" + base64( iv(12) || tag(16) || ciphertext )

@@ -1,3 +1,10 @@
+// 中文导读：
+// trusted_proxy.go 处理“可信反向代理”相关逻辑。
+// 当 BookFree 部署在 Nginx、Caddy、Cloudflare、Docker 网关后面时，真实用户 IP 可能在 X-Forwarded-For 等请求头里。
+// 不能盲目信任所有代理头，否则攻击者可以伪造 IP 绕过限流或审计。
+// 这个文件用于判断哪些代理来源可信，只有可信代理转发的头才应该被采用。
+// 如果你调整部署拓扑或 CDN，可能需要同步调整 BOOKFREE_TRUSTED_PROXIES。
+
 package httpsrv
 
 import (

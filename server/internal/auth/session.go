@@ -1,3 +1,10 @@
+// 中文导读：
+// session.go 负责服务端登录会话。
+// BookFree 采用 Cookie + 服务端 session 的方式，而不是把敏感 token 放在 localStorage。
+// 这样前端只需要正常 fetch，浏览器会自动携带 Cookie，后端再查 session 表确定用户身份。
+// Session 逻辑涉及安全、过期时间、Cookie 属性、数据库清理等。
+// 如果你要修改登录有效期、Cookie 名称、是否 SameSite/Secure，重点看这里和 config。
+
 // Package auth handles cookie-backed sessions. The cookie format and
 // `sessions` row layout match the Next.js project so users who are
 // already logged in DO NOT get kicked out by the cutover.

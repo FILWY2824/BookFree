@@ -1,3 +1,10 @@
+// 中文导读：
+// middleware.go 放 HTTP 中间件。
+// 中间件可以理解为“请求进入具体 handler 前后统一执行的一层包装”。
+// 常见职责包括：请求日志、panic 恢复、安全头、CORS、请求大小限制、真实 IP 识别等。
+// 把这些逻辑放中间件，可以避免每个业务 handler 重复写。
+// 修改中间件要谨慎，因为它会影响所有 API 和静态资源请求。
+
 // Package httpsrv contains the HTTP server, router glue, and the
 // generic middlewares that wrap every handler (request id, panic
 // recovery, security headers, access log).

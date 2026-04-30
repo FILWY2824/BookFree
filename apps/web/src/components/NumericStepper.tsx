@@ -1,3 +1,12 @@
+/*
+中文导读：
+NumericStepper 是一个数字步进输入组件，通常用于阅读设置里的字号、行高、缩放比例等数值调整。
+它把“减号按钮、数值显示/输入、加号按钮、最小值、最大值、步长”等通用逻辑封装起来。
+页面使用它时，只需要传入当前值和 onChange 回调，不需要每个页面都重复写加减按钮。
+如果你想调整按钮样式、禁用状态、键盘输入行为，优先看这个文件。
+如果你想改变某个具体设置项的取值范围，通常去调用 NumericStepper 的页面或组件里改 props。
+*/
+
 // NumericStepper — small "[−] [ value ] [+]" trio used in the
 // settings drawer for font size, line height, and column width.
 //

@@ -1,3 +1,12 @@
+/*
+中文导读：
+DashboardChrome 是“后台/主应用布局壳子”，可以理解为页面外框。
+它通常负责把 Sidebar 侧边栏和具体页面内容拼在一起，让 /library、/search、/notes 等页面保持统一布局。
+这个组件不应该包含太多业务逻辑；它的职责是布局、边距、背景、响应式结构。
+如果你想调整所有登录后页面的整体宽度、左右栏布局、顶部间距，优先看这个文件。
+如果只想改书架页内容，不要在这里写书架业务，应去 LibraryPage。
+*/
+
 // Wraps non-reader pages with the sidebar + main column. The reader
 // uses its own chrome (ReaderShell) so it can go full-bleed.
 

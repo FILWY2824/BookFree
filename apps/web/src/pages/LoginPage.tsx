@@ -1,3 +1,13 @@
+/*
+中文导读：
+LoginPage 是登录/注册页面，负责收集邮箱、密码、昵称等表单信息，并调用 auth.tsx 中提供的 login/register 方法。
+它是公开页面，不被 AuthGuard 保护；用户登录成功后会跳转到 /library 书架页。
+这个文件里最重要的状态通常是：当前是登录还是注册、输入框内容、提交中状态、错误提示。
+如果你想改登录页视觉样式，主要看 JSX 中的 className。
+如果你想改登录成功后的跳转路径，关注 navigate('/library') 一类逻辑。
+如果你想新增“忘记密码”“第三方登录”等入口，也通常从这个页面开始。
+*/
+
 // Login & register form. The two modes share most of the same fields;
 // we just toggle a flag rather than introduce two pages.
 

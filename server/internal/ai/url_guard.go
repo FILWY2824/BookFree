@@ -1,3 +1,10 @@
+// 中文导读：
+// url_guard.go 用于限制和校验外部 AI Provider 的 base URL。
+// 这是一个安全边界：用户或管理员配置模型接口地址时，后端不能无条件访问任意内网地址。
+// 否则可能产生 SSRF 风险，例如让服务器去访问 127.0.0.1、云厂商元数据地址或内网管理服务。
+// 这个文件通常会判断 URL scheme、host、端口、IP 范围等是否允许。
+// 如果你要放宽或收紧 AI 接口地址规则，必须先理解这里的安全目的，并同步测试本地部署和远程 Provider。
+
 // URL validation for user-supplied AI provider endpoints.
 //
 // The settings page lets a user paste a custom OpenAI-compatible base

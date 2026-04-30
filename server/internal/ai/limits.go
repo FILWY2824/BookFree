@@ -1,3 +1,9 @@
+// 中文导读：
+// limits.go 负责 AI 使用限额相关逻辑。
+// AI 调用通常有成本，也可能被滥用，所以需要按用户、时间窗口、模型或权限做限制。
+// 这个模块应该尽量只处理“是否允许调用、剩余额度、记录用量”，不要混入具体 Provider 的请求细节。
+// 如果你想给免费用户/管理员设置不同额度，通常会改这里、数据库配置和对应 handler。
+
 // Admin AI limits — let an operator set the monthly cost cap and the
 // per-minute rate cap for the built-in AI without restarting the
 // server. Caps are stored in app_config under key 'ai_system_limits'

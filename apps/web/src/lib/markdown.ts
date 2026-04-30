@@ -1,3 +1,11 @@
+/*
+中文导读：
+markdown.ts 用于把 AI 返回的 Markdown 文本转换成前端可展示的 HTML/结构。
+AI 回答里经常包含标题、列表、代码块、引用等 Markdown 语法，如果直接当普通文本显示，阅读体验会很差。
+这个文件的重点是安全和可控：不要让不可信内容随便插入危险 HTML，避免 XSS。
+如果你想支持新的 Markdown 语法，例如表格、任务列表、脚注，可以从这里扩展。
+*/
+
 // Tiny self-contained Markdown renderer used by the AI chat panel.
 //
 // We deliberately don't ship a full library (markdown-it / remark) —

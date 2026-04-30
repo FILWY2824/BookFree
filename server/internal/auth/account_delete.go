@@ -1,3 +1,9 @@
+// 中文导读：
+// account_delete.go 负责账号删除相关逻辑。
+// 删除账号不是简单删 users 表一行，因为还可能有关联书籍、笔记、进度、AI 会话、上传文件等数据。
+// 实现时要保证数据库记录和文件存储尽量一致，避免删除一半失败后留下孤儿数据。
+// 这是高风险操作，前端必须有确认流程，后端也要检查当前登录用户权限。
+
 // Account deletion handler. The path is DELETE /api/auth/me — a
 // logged-in user wipes their own account. Mirrors the "right to be
 // forgotten" expectation and gives the user a button to remove all

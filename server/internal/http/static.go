@@ -1,3 +1,9 @@
+// 中文导读：
+// static.go 负责服务前端静态文件。
+// BookFree 是 Web 优先产品，但生产部署时希望 Go 后端可以同时提供 API 和前端页面。
+// 这里会处理 index.html、assets、SPA fallback 等逻辑，让用户刷新 /book/:id 也能得到前端入口。
+// 如果你遇到“开发环境正常，生产刷新页面 404”，通常要检查这里的 fallback 逻辑。
+
 package httpsrv
 
 import (

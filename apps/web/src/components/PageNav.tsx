@@ -1,3 +1,12 @@
+/*
+中文导读：
+PageNav 是阅读器里的分页/翻页导航组件。
+不同格式的书籍翻页方式不同：TXT 更像章节切换，PDF 是页码，EPUB 可能是 iframe 内部分页。
+这个组件的目标是把“上一页/下一页/当前页/总页数/禁用状态”等通用 UI 抽出来。
+如果你想改翻页按钮样式、按钮位置、无上一页时是否禁用，优先看这个文件。
+如果你想改具体格式如何计算页码，则要去对应 reader 组件。
+*/
+
 // PageNav renders the four navigation affordances every paginated
 // reader needs: a wide left click-zone (33% of the viewport), a wide
 // right click-zone (33% of the viewport), and two pill-shaped

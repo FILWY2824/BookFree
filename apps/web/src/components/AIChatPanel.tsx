@@ -1,3 +1,12 @@
+/*
+中文导读：
+AIChatPanel 是前端 AI 对话面板，负责展示消息列表、输入问题、发送请求、显示流式回复等交互。
+它是 AI 阅读能力的主要 UI 入口，可能被阅读器页面或独立 AI 页面复用。
+这个组件通常会处理：用户输入、发送中状态、消息滚动、错误提示、停止生成、引用书籍上下文等。
+如果你想改 AI 对话的界面样式、输入框按钮、消息气泡、空状态文案，优先看这里。
+如果你想改真正的 AI 请求参数或接口路径，需要结合 lib/ai.ts、lib/aiSessions.ts 和后端 ai handler 一起看。
+*/
+
 // AIChatPanel — the right-side drawer that lets the user chat with
 // the AI about the current book.
 //

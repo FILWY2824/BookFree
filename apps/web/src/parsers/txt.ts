@@ -1,3 +1,12 @@
+/*
+中文导读：
+txt.ts 是浏览器端 TXT 文本解析逻辑。
+它会把纯文本拆成章节、段落或阅读器可显示的结构。
+TXT 看似简单，但要处理编码、空行、章节标题识别、超长文本分段等问题。
+如果你想优化 TXT 章节识别规则，例如识别“第 1 章”“Chapter 1”“一、标题”，可以从这里入手。
+注意大文本解析时不要制造过多临时数组，避免浏览器内存过高。
+*/
+
 // TXT parser. Reads the file, autodetects encoding (UTF-8 vs GB18030
 // for Chinese text), and slices the text into chapters using the
 // common table-of-contents markers seen in zh/en text dumps:

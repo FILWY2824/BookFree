@@ -1,3 +1,12 @@
+/*
+中文导读：
+aiSessions.ts 负责前端 AI 会话相关 API 或状态辅助逻辑。
+AI 阅读功能通常包括：围绕当前书籍提问、续聊、查看历史消息、保存会话等。
+这个文件一般作为页面/组件和后端 AI 接口之间的薄封装，帮助统一请求路径、参数和响应结构。
+如果以后 Android 端也要复用 AI 能力，真正稳定的是后端 /api/ai* 接口；这里是 Web 前端调用这些接口的实现。
+如果你想改 AI 面板 UI，更多看 AIChatPanel；如果你想改请求结构或会话列表加载，优先看这里。
+*/
+
 // Chat-session persistence for the in-reader AI panel.
 //
 // A "session" is one back-and-forth conversation with the model,

@@ -1,3 +1,11 @@
+/*
+中文导读：
+ai.ts 是前端 AI 功能的接口封装层。
+页面或组件不应该到处手写 fetch('/api/ai/...')，而是通过这里统一调用。
+这样未来如果后端接口路径、请求字段、错误格式发生变化，只需要集中修改这里。
+如果你要新增 AI 功能，例如“总结当前章节”“解释选中文本”“生成读书卡片”，通常先在后端加接口，再在这里加对应函数，最后给页面调用。
+*/
+
 // AI client. Talks to the server's /api/ai/chat endpoint.
 //
 // The server is responsible for holding the API key (env var or per-

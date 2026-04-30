@@ -1,3 +1,11 @@
+/*
+中文导读：
+Logo 是 BookFree 的品牌图标组件，负责在侧边栏、登录页或顶部区域展示统一标识。
+它通常不包含业务逻辑，只包含 SVG/HTML 结构和样式 className。
+如果你想换图标、改颜色、改大小，优先看这个文件。
+如果某个页面只想临时改变 Logo 尺寸，一般通过传入 className 或外层容器样式实现，而不是复制一份新 Logo。
+*/
+
 // The BookFree mark — an open-book glyph drawn from primitives so it
 // scales crisply at any size and inherits currentColor for theming.
 

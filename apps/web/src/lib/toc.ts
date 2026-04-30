@@ -1,3 +1,12 @@
+/*
+中文导读：
+toc.ts 负责目录数据处理。
+不同书籍格式返回的目录结构可能不一致，这个文件用于把目录规范化、扁平化或建立章节索引。
+ReaderPage 和 TocDrawer 通常依赖这里的工具函数来显示目录和定位章节。
+如果目录显示层级错乱、点击目录跳错章节、当前章节高亮不准，可以优先检查这里。
+如果新增格式解析器，也应尽量输出能被 toc.ts 处理的统一目录结构。
+*/
+
 // Client wrapper for the hierarchical TOC endpoint.
 //
 // Why this is separate from chapters/list:

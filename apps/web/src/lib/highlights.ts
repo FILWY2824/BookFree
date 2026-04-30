@@ -1,3 +1,12 @@
+/*
+中文导读：
+highlights.ts 负责前端高亮/划线相关的本地逻辑。
+在阅读器里，用户选中文字后可能创建高亮、笔记或定位到某段内容。
+这个文件通常处理“高亮数据怎么比较、怎么合并、怎么映射到页面文本”等问题。
+它应该尽量保持纯函数化，减少对 React 组件状态的依赖，这样 TXT/EPUB/PDF 阅读器都更容易复用。
+如果你想改高亮颜色、样式，可能还需要配合 styles.css 或相关 reader 组件一起看。
+*/
+
 // Client-side wrappers for the highlights and notes API surface
 // already exposed by the Go server (server/internal/notes).
 //

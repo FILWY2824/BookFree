@@ -1,3 +1,12 @@
+/*
+中文导读：
+SettingsPage 是设置页面，用于展示账号信息、阅读设置入口、退出登录或其他系统配置。
+它是登录后的独立页面，和阅读器里的 SettingsDrawer 不完全一样：这里更偏账号/全局设置。
+如果你要增加用户昵称、头像、AI Provider 配置、隐私选项、账号删除入口，可能会从这个页面扩展。
+设置页通常会调用后端账号或配置 API，因此要注意 loading、保存中、保存失败、权限不足等状态。
+涉及安全或账号删除的操作必须有明确确认流程，不能只靠一个普通按钮直接执行。
+*/
+
 // Settings — split into two top-level sections per the user's spec:
 //
 //   • 用户设置  — account info, sign-out. We deliberately removed the

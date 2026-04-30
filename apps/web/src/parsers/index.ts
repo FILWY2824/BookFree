@@ -1,3 +1,11 @@
+/*
+中文导读：
+parsers/index.ts 是前端解析器的统一出口。
+解析器的职责是把不同格式的文件或文本转换成阅读器更容易处理的统一结构。
+当前项目后端也有解析/入库能力；前端 parser 更多服务于浏览器端展示或特定格式处理。
+如果你新增一种格式，不建议直接在页面里写解析逻辑，而应该在 parsers 目录里做实现，再从这里导出。
+*/
+
 // Format dispatcher for client-side parsing. Returns the structured
 // payload the server's /api/books/{id}/ingest endpoint expects:
 //
