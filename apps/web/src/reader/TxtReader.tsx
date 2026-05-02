@@ -319,7 +319,21 @@ export default function TxtReader({
     const chapterHighlights = highlights.filter(
       h => !h.chapterId || h.chapterId === body.id,
     );
-    applyAllHighlights(root, chapterHighlights, notedSet);
+    const applied = applyAllHighlights(root, chapterHighlights, notedSet);
+
+    // 安全网：如果本轮有待应用的高亮但全部解析失败（DOM 可能还未完全就绪，
+    // 例如 dangerouslySetInnerHTML 刚渲染、CSS columns 尚未稳定），在下一帧
+    // 重新尝试一次。这解决了"退出再进来时批注消失"的问题——批注数据往往晚于
+    // body 到达，触发 useLayoutEffect 时 DOM 可能处于中间状态。
+    let retryRaf: number | undefined;
+    if (chapterHighlights.length > 0 && applied === 0) {
+      retryRaf = requestAnimationFrame(() => {
+        const r = proseRef.current;
+        if (!r) return;
+        clearHighlights(r);
+        applyAllHighlights(r, chapterHighlights, notedSet);
+      });
+    }
 
     if (pageMode === 'paginated') {
       // CSS multicol pagination: the column-track lives on the
@@ -356,7 +370,10 @@ export default function TxtReader({
         readyFiredRef.current = true;
         onReady?.();
       }
-      return () => cancelAnimationFrame(raf);
+      return () => {
+        cancelAnimationFrame(raf);
+        if (retryRaf !== undefined) cancelAnimationFrame(retryRaf);
+      };
     } else {
       setPageCount(1);
     }
@@ -364,6 +381,9 @@ export default function TxtReader({
     if (!readyFiredRef.current) {
       readyFiredRef.current = true;
       onReady?.();
+    }
+    if (retryRaf !== undefined) {
+      return () => cancelAnimationFrame(retryRaf);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [html, body, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth, highlights, notes]);
@@ -676,13 +696,19 @@ export default function TxtReader({
     }
   }, [pageMode, pageIdx, pageCount, canNextChapter, chapterOrd, onChapterChange]);
 
-  // 选中文本处理：监听 document 的 selectionchange 事件。
+  // 选区变化监听：负责打开工具条（用户框选文本时）和延迟关闭（选区被折叠时）。
   //
-  // 浏览器没有直接给“用户在某个 div 内完成选择”的高级事件，所以这里需要：
-  // 1. 读取 window.getSelection()；
-  // 2. 判断 Range 是否在 proseRef 正文容器内部；
-  // 3. 取选区矩形位置，打开 SelectionToolbar；
-  // 4. 把 Range clone 一份存到 tbRangeRef，避免用户点击工具条时选区丢失。
+  // 关键设计：当选区变为空时，**不立即关闭工具条**，也**不清除 tbRangeRef**。
+  // 原因：用户点击工具条按钮时，某些浏览器会在 click 事件之前折叠选区并触发
+  // selectionchange。如果在这里立即关闭工具条、清空 range 快照，click 事件到达时
+  // 工具条已经卸载、range 已经丢失，导致标注无法创建——这就是"批注没有高亮效果"
+  // 的根本原因。
+  //
+  // 解决方案：空选区时改用 80ms 延迟关闭。在延迟窗口内，如果工具条按钮的 click
+  // 触发了标注创建，标注回调会正常使用 tbRangeRef 并主动关闭工具条；延迟到期后
+  // 若工具条仍处于 create 模式，才真正关闭。tbRangeRef 始终只在显式关闭路径
+  // （closeToolbar / onApplyHighlight 成功 / click-outside）中清除。
+  const selDismissTimer = useRef<number | null>(null);
   useEffect(() => {
     const onSel = () => {
       const sel = window.getSelection();
@@ -692,17 +718,31 @@ export default function TxtReader({
       }
       const range = sel.getRangeAt(0);
       const text = range.toString();
-      // Empty selection in 'create' mode means the user clicked away
-      // and the caret moved — close the toolbar. (Both cases land
-      // here because selectionchange fires on caret moves too.)
+
       if (!text || text.trim().length === 0) {
+        // 选区空了。如果当前在 create 模式，延迟关闭（给工具条 click 留出时间）。
+        // 注意：绝不在此处清除 tbRangeRef——range 快照必须保留到 click 使用完毕。
         if (tbMode === 'create') {
-          setTbMode(null);
-          setTbAnchor(null);
-          tbRangeRef.current = null;
-          onSelection?.(null);
+          if (selDismissTimer.current != null) window.clearTimeout(selDismissTimer.current);
+          selDismissTimer.current = window.setTimeout(() => {
+            selDismissTimer.current = null;
+            // 仅在仍处于 create 模式时关闭——如果工具条已因其他操作关闭，此处不再重复关闭。
+            setTbMode(prev => {
+              if (prev === 'create') {
+                setTbAnchor(null);
+                onSelection?.(null);
+                return null;
+              }
+              return prev;
+            });
+          }, 80);
         }
         return;
+      }
+      // 用户做了新选区——取消任何待执行的延迟关闭。
+      if (selDismissTimer.current != null) {
+        window.clearTimeout(selDismissTimer.current);
+        selDismissTimer.current = null;
       }
       // Confirm range is inside the prose root.
       if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
@@ -717,7 +757,13 @@ export default function TxtReader({
       onSelection?.(text);
     };
     document.addEventListener('selectionchange', onSel);
-    return () => document.removeEventListener('selectionchange', onSel);
+    return () => {
+      document.removeEventListener('selectionchange', onSel);
+      if (selDismissTimer.current != null) {
+        window.clearTimeout(selDismissTimer.current);
+        selDismissTimer.current = null;
+      }
+    };
   }, [tbMode, onSelection]);
 
   // Click-outside dismissal for the selection toolbar. The previous
@@ -1042,6 +1088,10 @@ export default function TxtReader({
   }, [tbCurrent, notes]);
 
   const closeToolbar = useCallback(() => {
+    if (selDismissTimer.current != null) {
+      window.clearTimeout(selDismissTimer.current);
+      selDismissTimer.current = null;
+    }
     setTbMode(null);
     setTbAnchor(null);
     setTbCurrent(null);

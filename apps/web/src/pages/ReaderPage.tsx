@@ -723,7 +723,7 @@ export default function ReaderPage() {
 
   return (
     <div
-      className="h-screen flex flex-col"
+      className="h-screen flex flex-col overflow-hidden"
       data-reader-theme={prefs.theme}
       style={{ background: 'var(--reader-bg)' }}
     >
@@ -756,7 +756,7 @@ export default function ReaderPage() {
         />
       </div>
 
-      <div className="flex-1 min-h-0 flex">
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {/*
          * 非 PDF 书籍显示目录栏。
          * 如果 tocItems 为空，就把 chapters 转成扁平目录兜底。

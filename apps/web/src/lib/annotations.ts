@@ -184,7 +184,7 @@ export function applyAllHighlights(
   root: HTMLElement,
   highlights: Highlight[],
   notedSet: Set<string>,
-): void {
+): number {
   type Entry = { h: Highlight; r: Range };
   const entries: Entry[] = [];
   for (const h of highlights) {
@@ -202,6 +202,7 @@ export function applyAllHighlights(
   for (const { h, r } of entries) {
     wrapRange(r, h, notedSet.has(h.id));
   }
+  return entries.length;
 }
 
 // Strip every <span data-hl-id> wrapper without touching the text inside.
