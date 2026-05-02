@@ -301,19 +301,14 @@ export default function TxtReader({
     return cleanLeadingWhitespace(raw);
   }, [body]);
 
-  // 章节 HTML 渲染到 DOM 后，应用已保存的标注，并重新计算分页。
+  // 章节内容或排版参数变化时，重新测量分页，并在绘制前应用已保存的标注。
   //
-  // 这里用 useLayoutEffect，而不是 useEffect：
-  // - useLayoutEffect 在浏览器绘制前执行；
-  // - 我们需要在用户看到页面之前完成“包裹高亮 span”和“测量页数”；
-  // - 否则用户可能看到一瞬间无标注或页数跳动的闪烁。
-  //
-  // 一个很重要的设计点（已修复）：
-  // 依赖数组中现在包含 highlights 和 notes。
-  // 修复原因：退出阅读后重新进入时，章节HTML和标注数据是两个独立的异步请求。
-  // 如果章节HTML先返回，此effect在highlights还是空数组时就运行了，
-  // 之后标注数据返回时effect不会重新运行（旧代码未将highlights加入依赖），
-  // 导致高亮永远不显示。现在加入依赖后，标注数据到达会触发重新执行。
+  // 标注应用策略：
+  // - 此 useLayoutEffect 在章节 HTML / body / 排版 或标注数据变化时触发，
+  //   负责在绘制前完成 clearHighlights + applyAllHighlights；
+  // - onApplyHighlight 中不再立即包裹 DOM，而是仅创建后端记录 + 更新 state，
+  //   由本 effect 统一在绘制前包裹，避免立即包裹后被 clearHighlights 清除；
+  // - 退出阅读重新进入时：标注数据到达（即使晚于 body）会触发本 effect 重新执行。
   useLayoutEffect(() => {
     const root = proseRef.current;
     if (!root || !body) return;
@@ -828,14 +823,11 @@ export default function TxtReader({
         color,
         style,
       });
-      // Wrap the live range immediately so the user sees the result
-      // without waiting for the next chapter re-render. The
-      // incremental-sync useEffect won't strip our new span — it sees
-      // a span whose data-hl-id is in `highlights` state and leaves
-      // it alone.
-      try {
-        wrapRange(range.cloneRange(), created, false);
-      } catch { /* the incremental effect will retry from locator */ }
+      // 不在此处立即包裹 DOM——由 useLayoutEffect（依赖 highlights）
+      // 在绘制前统一完成包裹。立即包裹会在 useLayoutEffect 的
+      // clearHighlights 中被清除，然后重新从 locator 包裹。如果 locator
+      // 解析因 DOM 变化而失败，标注就会丢失。统一在 useLayoutEffect 中
+      // 包裹可避免两轮操作造成的不一致。
       setHighlights(prev => [...prev, created]);
       const sel = window.getSelection();
       sel?.removeAllRanges();
@@ -1095,7 +1087,7 @@ export default function TxtReader({
           >
             <div
               ref={proseRef}
-              className="reader-prose reader-paginated-track"
+              className="reader-prose reader-paginated reader-paginated-track"
               onClick={onProseClick}
               dangerouslySetInnerHTML={{ __html: html || '' }}
               // Inline font styles are needed here because the parent
@@ -1115,7 +1107,7 @@ export default function TxtReader({
           </PaginatedFrame>
         ) : (
           <div
-            className="reader-prose mx-auto px-6 py-12"
+            className="reader-prose mx-auto px-10 py-14"
             ref={proseRef}
             onClick={onProseClick}
             style={{
@@ -1200,18 +1192,10 @@ function PaginatedFrame({
       <div
         style={{
           height: '100%',
-          // Asymmetric padding: top is 3rem (matches the rest of the
-          // chrome), bottom is generous (4.5rem) so the user always
-          // has visible breathing room between the last visible line
-          // and the screen edge. CSS multicol with column-fill:auto
-          // packs content into the column from the top, and Chrome
-          // sometimes renders a partial last line right at the column
-          // bottom — without this buffer the partial line sits flush
-          // against the viewport edge and looks cut off ("字都是屏幕
-          // 下方"). The extra space at the bottom is the simplest fix
-          // and also matches the visual conventions of dedicated
-          // ebook readers (Kindle, Apple Books, 微信读书).
-          padding: '3rem 1.5rem 4.5rem',
+          // 阅读区域四周留有充足间距，确保文字不贴边：
+          // padding：上 3.5rem 下 5rem 左右 2.5rem。
+          // 底部留更大空间以避免 CSS columns 中最后一行被截断的视觉问题。
+          padding: '3.5rem 2.5rem 5rem',
           maxWidth: columnMaxWidth(prefs),
           margin: '0 auto',
           boxSizing: 'border-box',
@@ -1219,7 +1203,7 @@ function PaginatedFrame({
         }}
       >
         <div
-          className="reader-paginated-track"
+          className="reader-paginated reader-paginated-track"
           style={{
             height: '100%',
             width: '100%',

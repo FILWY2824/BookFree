@@ -218,14 +218,13 @@ function TocNode({
     return false;
   })();
 
+  // isAncestor：当前节点是活跃路径上的祖先节点（但不是叶子节点本身）。
+  // 祖先节点需要二级高亮，以便用户看到三级、四级子目录时，
+  // 其上级目录标题在目录树中也保持视觉高亮，不脱离目录追踪。
+  const isAncestor = !isActive && autoExpandKeys.has(pathKey);
+
   const userPref = userToggle[pathKey];
   const autoExpanded = autoExpandKeys.has(pathKey);
-  // 展开逻辑（修复后）：
-  //   1. 如果节点处于活跃路径上（autoExpanded），始终展开——即使用户手动折叠过；
-  //   2. 如果用户没有手动折叠过（userPref !== false），默认展开；
-  //   3. 只有用户明确折叠了、且不在活跃路径上的节点才折叠。
-  // 这样做的效果是：目录默认全部展开，用户可以手动折叠不关心的部分，
-  // 但当前正在阅读的分支会始终保持展开（便于实时追踪阅读位置）。
   const expanded = autoExpanded || userPref !== false;
 
   const clickable = !!item.chapterId;
@@ -241,12 +240,20 @@ function TocNode({
       <div
         ref={isActive ? activeRef : undefined}
         className="toc-row"
-        data-active={isActive ? '1' : undefined}
+        data-active={isActive ? '1' : isAncestor ? 'ancestor' : undefined}
         style={{
           // Indent by depth: 14px per level, plus 8px gutter.
           paddingLeft: 8 + depth * 14 + 'px',
-          background: isActive ? 'var(--reader-accent)' : 'transparent',
+          background: isActive
+            ? 'var(--reader-accent)'
+            : isAncestor
+              ? 'var(--reader-accent-weak, rgba(124,90,58,0.12))'
+              : 'transparent',
           color: isActive ? '#fff' : 'var(--reader-fg)',
+          // 祖先节点左侧加一条细线，表示当前阅读位置在这条路径上
+          borderLeft: isAncestor
+            ? '2px solid var(--reader-accent)'
+            : '2px solid transparent',
         }}
       >
         {/* Chevron — only for parents. We render a placeholder for

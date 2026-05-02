@@ -61,6 +61,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
   letter-spacing: 0;
   word-spacing: 0;
+  /* 防止任何内容溢出阅读区域：
+     - overflow-wrap / word-break：长单词和非断行字符不会撑破容器 */
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 .reader-prose p { margin: 1em 0; }
 .reader-prose h1, .reader-prose h2, .reader-prose h3 {
@@ -129,7 +133,8 @@ body {
    between pages, and force long words to break instead of producing
    columns wider than the viewport.
    ───────────────────────────────────────────────────────────────── */
-.reader-paginated {
+.reader-paginated,
+.reader-paginated-track {
   /* See note on .reader-prose above — font-family is NOT declared here
      so the inline style on the page wrapper actually wins. */
   color: var(--reader-fg);
@@ -138,6 +143,9 @@ body {
   -moz-osx-font-smoothing: grayscale;
   letter-spacing: 0;
   word-spacing: 0;
+  /* 防止分页模式下内容溢出：长字符串、表格、预格式化文本不能超出列边界。 */
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 .reader-paginated p { margin: 1em 0; }
 .reader-paginated h1, .reader-paginated h2, .reader-paginated h3 {

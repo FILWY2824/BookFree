@@ -156,7 +156,39 @@ function matches(label: string, needle: string): boolean {
   const c = collapseSpaces(label);
   if (c === needle) return true;
   if (c.startsWith(needle)) return true;
-  return c.includes(needle) || needle.includes(c);
+  if (c.includes(needle) || needle.includes(c)) return true;
+  // 编号标题的特殊匹配："1.2.1 一致性模型" 应匹配 "1.2 一致性"。
+  // 将编号与文字分开，当编号层级不同但文字相同时视为匹配。
+  const cNum = extractNumPrefix(c);
+  const nNum = extractNumPrefix(needle);
+  if (cNum && nNum) {
+    // 如果编号不同但文字相同（如 "1.2 一致性" vs "1.2.1 一致性模型"），
+    // 检查较短的编号是否是较长编号的前缀。
+    if (cNum.text === nNum.text || cNum.text.includes(nNum.text) || nNum.text.includes(cNum.text)) {
+      return true;
+    }
+    // 如果文字也不同，检查编号是否匹配（如深度不同的标号 "1.2" 匹配 "1.2.1"）
+    if (cNum.num && nNum.num) {
+      if (cNum.num === nNum.num || cNum.num.startsWith(nNum.num + '.') || nNum.num.startsWith(cNum.num + '.')) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** 从标题字符串中提取编号前缀和剩余文字。
+ *  例："1.2.1 一致性模型" → { num: "1.2.1", text: "一致性模型" }
+ *      "1.2 一致性"       → { num: "1.2", text: "一致性" }
+ *      "第一章 引言"      → { num: "第一章", text: "引言" } */
+function extractNumPrefix(s: string): { num: string; text: string } | null {
+  // 数字编号：1.2.1 / 1.2 等
+  const m1 = s.match(/^([\d.]+)\s+(.+)/);
+  if (m1) return { num: m1[1], text: collapseSpaces(m1[2]) };
+  // 中文编号：第一章 / 第二节 等
+  const m2 = s.match(/^(第[零一二三四五六七八九十百千]+[章节節篇回卷])\s*(.*)/);
+  if (m2) return { num: m2[1], text: collapseSpaces(m2[2] || '') };
+  return null;
 }
 
 function walk(items: TocItem[], pred: (label: string) => boolean): TocItem | null {
@@ -172,4 +204,30 @@ function walk(items: TocItem[], pred: (label: string) => boolean): TocItem | nul
 
 function collapseSpaces(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 在 TOC 树中查找指定 chapterId 对应的节点，返回从根到该节点的完整路径。
+ * 当章节内没有 h1-h6 标题时，通过此函数仍可通过章节 ID 定位目录。
+ * 返回 null 表示 TOC 中没有此 chapterId。
+ */
+export function findTocPathByChapterId(
+  items: TocItem[],
+  chapterId: string,
+): TocItem[] | null {
+  function walk(nodes: TocItem[], path: TocItem[]): TocItem[] | null {
+    for (const it of nodes) {
+      path.push(it);
+      if (it.chapterId === chapterId) {
+        return [...path];
+      }
+      if (it.children && it.children.length) {
+        const found = walk(it.children, path);
+        if (found) return found;
+      }
+      path.pop();
+    }
+    return null;
+  }
+  return walk(items, []);
 }

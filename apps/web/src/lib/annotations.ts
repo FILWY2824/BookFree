@@ -72,6 +72,10 @@ export function locatorToRangeForHighlight(root: HTMLElement, h: Highlight): Ran
 // for `highlight`. Returns the inserted spans so the caller can
 // attach event handlers (the reader does this to know which highlight
 // the user clicked on). Spans get data-hl-id and data-has-note.
+//
+// 健壮性增强：当 surroundContents 失败时（通常因为 Range 跨越了元素边界），
+// 回退到手动包裹策略：用 extractContents 取出内容，手动包入 span 后放回。
+// 这比之前的静默跳过更可靠，确保批注 DOM 不会被丢弃。
 export function wrapRange(range: Range, highlight: Highlight, hasNote: boolean): HTMLSpanElement[] {
   const spans: HTMLSpanElement[] = [];
   const fragments = collectTextRanges(range);
@@ -84,9 +88,20 @@ export function wrapRange(range: Range, highlight: Highlight, hasNote: boolean):
       r.surroundContents(span);
       spans.push(span);
     } catch {
-      // surroundContents can fail when the range still partially crosses
-      // element boundaries that we couldn't fully split. Skip silently —
-      // partial wrap is better than a thrown exception.
+      // surroundContents 失败时的回退策略：
+      // extractContents 把所有片段内容移出 → 包入 span → 放回原位。
+      try {
+        const span = document.createElement('span');
+        span.className = highlightClassName(highlight, hasNote);
+        span.setAttribute('data-hl-id', highlight.id);
+        if (hasNote) span.setAttribute('data-has-note', '1');
+        const frag = r.extractContents();
+        span.appendChild(frag);
+        r.insertNode(span);
+        spans.push(span);
+      } catch {
+        // 两次尝试均失败，跳过此片段（部分包裹总有比没有好）。
+      }
     }
   }
   return spans;

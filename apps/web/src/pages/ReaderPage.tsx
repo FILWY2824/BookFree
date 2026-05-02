@@ -57,7 +57,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, ApiException } from '../lib/api';
 import { loadPrefs, savePrefs, resolvePageMode, type ReaderPrefs } from '../lib/prefs';
-import { fetchToc, findTocByHeadingPath, type TocItem } from '../lib/toc';
+import { fetchToc, findTocByHeadingPath, findTocPathByChapterId, type TocItem } from '../lib/toc';
 import type { HighlightColor, HighlightStyle } from '../lib/highlights';
 import SettingsDrawer from '../components/SettingsDrawer';
 import TocDrawer from '../components/TocDrawer';
@@ -573,7 +573,24 @@ export default function ReaderPage() {
     }
 
     /*
-     * 没有标题路径时，退回到章节列表。
+     * 没有标题路径时，通过 activeChapterId 在 TOC 树中查找当前章节，
+     * 构建祖先路径用于目录高亮。这样即使章节内容没有 h1-h6 标题，
+     * 目录也能正确追踪到当前章节及其上级目录。
+     */
+    if (activeChapterId && tocItems.length > 0) {
+      const tocPath = findTocPathByChapterId(tocItems, activeChapterId);
+      if (tocPath && tocPath.length > 0) {
+        const last = tocPath[tocPath.length - 1];
+        return {
+          chapterTitle: last.label,
+          activeTocLabel: last.label,
+          activeTocPath: tocPath.map(it => it.label),
+        } as R;
+      }
+    }
+
+    /*
+     * 如果 TOC 中也找不到，退回到章节列表。
      */
     const active = activeChapterId
       ? chapters.find(c => c.id === activeChapterId)
