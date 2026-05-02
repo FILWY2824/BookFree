@@ -220,10 +220,13 @@ function TocNode({
 
   const userPref = userToggle[pathKey];
   const autoExpanded = autoExpandKeys.has(pathKey);
-  const expanded =
-    userPref === true ? true :
-    userPref === false ? false :
-    autoExpanded;
+  // 展开逻辑（修复后）：
+  //   1. 如果节点处于活跃路径上（autoExpanded），始终展开——即使用户手动折叠过；
+  //   2. 如果用户没有手动折叠过（userPref !== false），默认展开；
+  //   3. 只有用户明确折叠了、且不在活跃路径上的节点才折叠。
+  // 这样做的效果是：目录默认全部展开，用户可以手动折叠不关心的部分，
+  // 但当前正在阅读的分支会始终保持展开（便于实时追踪阅读位置）。
+  const expanded = autoExpanded || userPref !== false;
 
   const clickable = !!item.chapterId;
 

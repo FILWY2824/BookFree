@@ -308,12 +308,12 @@ export default function TxtReader({
   // - 我们需要在用户看到页面之前完成“包裹高亮 span”和“测量页数”；
   // - 否则用户可能看到一瞬间无标注或页数跳动的闪烁。
   //
-  // 一个很重要的设计点：
-  // 这个 effect 只在“章节内容/影响排版的阅读设置”变化时运行，不在每次 highlights
-  // 或 notes state 改变时运行。原因是：如果用户刚刚创建一个高亮，我们已经立即在 DOM
-  // 里 wrapRange 让它显示；若此时又因为 state 更新而清空所有 span 再重建，一旦 locator
-  // 暂时解析失败，刚创建的高亮就会被擦掉。所以下方还有一个“增量同步标注”的 effect，
-  // 专门处理新增/删除/笔记状态变化。
+  // 一个很重要的设计点（已修复）：
+  // 依赖数组中现在包含 highlights 和 notes。
+  // 修复原因：退出阅读后重新进入时，章节HTML和标注数据是两个独立的异步请求。
+  // 如果章节HTML先返回，此effect在highlights还是空数组时就运行了，
+  // 之后标注数据返回时effect不会重新运行（旧代码未将highlights加入依赖），
+  // 导致高亮永远不显示。现在加入依赖后，标注数据到达会触发重新执行。
   useLayoutEffect(() => {
     const root = proseRef.current;
     if (!root || !body) return;
@@ -371,7 +371,7 @@ export default function TxtReader({
       onReady?.();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [html, body, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth]);
+  }, [html, body, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth, highlights, notes]);
 
   // 标注增量同步：highlights / notes 数组变化时运行。
   //

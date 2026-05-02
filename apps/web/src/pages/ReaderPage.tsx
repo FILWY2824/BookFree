@@ -756,7 +756,12 @@ export default function ReaderPage() {
           />
         )}
 
-        <div className="flex-1 min-w-0 relative">
+        {/*
+         * 阅读器主容器。
+         * overflow-hidden 确保文字只在阅读区域内显示，不会溢出到屏幕外。
+         * min-h-0 防止 flex 子元素在内容过长时撑破父容器。
+         */}
+        <div className="flex-1 min-w-0 min-h-0 relative overflow-hidden">
           {/*
            * 不支持阅读的格式：
            * - 原始文件仍在书架中；

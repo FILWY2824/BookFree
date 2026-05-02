@@ -443,19 +443,17 @@ export function topVisibleAnchor(root: HTMLElement, chapterId: string): CFIv2 | 
 // headings exist at all. The LAST entry is the heading the reader
 // is currently inside.
 export function precedingHeadings(root: HTMLElement): string[] {
+  // 收集章节内所有标题元素（h1-h6）。
   const headings = Array.from(
     root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'),
   );
   if (headings.length === 0) return [];
 
+  // 收集所有段落（块级文本元素），用于判断当前阅读到哪里。
   const paragraphs = collectParagraphs(root);
-  // Decide the "current viewing y": the top of the first visible
-  // paragraph, or just 0 if nothing is visible (chapter just loaded).
-  // Visibility is BOTH vertical and horizontal because in paginated
-  // mode the chapter's content is laid out across many columns
-  // arranged horizontally and only one column is on-screen at a time.
-  // Without the horizontal check we'd treat "column 3 paragraph that
-  // happens to share a y-coordinate with our column 1" as visible.
+
+  // 确定"当前阅读位置的 y 坐标"：找到第一个在视口内可见的段落。
+  // 同时检查水平位置，因为分页模式下内容横向排列在多列中。
   const vw = window.innerWidth || document.documentElement.clientWidth;
   const isVisible = (rect: DOMRect) =>
     rect.top >= 0 && rect.bottom > 0 &&
@@ -470,9 +468,8 @@ export function precedingHeadings(root: HTMLElement): string[] {
       break;
     }
   }
-  // If nothing is visible, the user is just about to start the
-  // chapter — return only the first non-empty heading so the header
-  // shows that one section instead of a giant ancestor list.
+
+  // 如果没有任何可见段落（比如刚加载章节），只返回第一个非空标题。
   if (!foundVisible) {
     for (const h of headings) {
       const t = (h.textContent ?? '').trim();
@@ -481,52 +478,60 @@ export function precedingHeadings(root: HTMLElement): string[] {
     return [];
   }
 
-  const out: string[] = [];
-  // Tolerance: a heading right at the page top should count as "in
-  // view". A few px of slop covers sub-pixel rounding and tiny
-  // top-margin artefacts.
+  // ── 第一步：收集当前位置之前的所有标题 ──
+  // 遍历标题，只保留位于当前阅读位置之前（或正好在当前位置）的标题。
+  // TOL 容差：标题恰好在页面顶部时也算作"在视野内"。
+  const rawPreceding: Array<{ level: number; text: string }> = [];
   const TOL = 4;
   for (const h of headings) {
     const text = (h.textContent ?? '').trim();
     if (!text) continue;
     const rect = h.getBoundingClientRect();
-    // Same horizontal-overlap caveat as the paragraph scan: a heading
-    // on a different page (column) would otherwise sneak in. We skip
-    // those by checking horizontal overlap with the viewport, but we
-    // still need to traverse them in document order to find what
-    // comes BEFORE the current page — so we look at horizontal
-    // position relative to the first visible paragraph: anything
-    // strictly to its right is on a future page.
-    if (rect.left >= vw) {
-      // Heading is on a later page than the visible paragraph. Stop;
-      // anything beyond is also future.
-      break;
-    }
+
+    // 标题在当前页面右侧（未来的页面），终止遍历。
+    if (rect.left >= vw) break;
+
     if (rect.right <= 0 || rect.top > currentTop + TOL) {
-      // Heading is on an earlier (off-screen-left) page or already
-      // past the visible top. The earlier-page case is "previously
-      // read" content, which is exactly what we want to record as
-      // ancestor. So we keep recording but tighten the y-check: a
-      // heading on a previous page can pass the y-check because
-      // off-screen-left columns share the same y-axis. Skip
-      // horizontally-not-overlapping headings ONLY when also past
-      // the current top, so we don't push fake ancestors from way
-      // ahead of the user.
+      // 标题已经超过当前阅读位置的垂直位置，终止遍历。
       if (rect.top > currentTop + TOL) break;
-      // off-screen-left, on or before current vertical position:
-      // it's a real preceding heading — record it.
-      out.push(text);
-      continue;
-    }
-    if (rect.top <= currentTop + TOL) {
-      out.push(text);
-    } else {
+      // 标题在屏幕左侧（已翻过的页面），但垂直位置在当前阅读位置之前，
+      // 属于已读内容的真实前序标题，记录之。
+    } else if (rect.top > currentTop + TOL) {
       break;
     }
+
+    // 从标签名提取标题层级：h1→1, h2→2, ..., h6→6
+    const level = parseInt(h.tagName.charAt(1), 10);
+    rawPreceding.push({ level, text });
   }
-  // If even the first heading is past the current viewport, still
-  // emit it — better to show "this chapter starts with X" than
-  // nothing.
+
+  // ── 第二步：将扁平标题列表重建为层次化路径 ──
+  // 核心逻辑：
+  //   用一个 6 槽的数组（对应 h1-h6）维护"当前层级栈"。
+  //   遇到 h_n 标题时，更新第 n 层为当前标题，并清空 n+1 及以下的层级。
+  //   这样可以保证结果始终是一条从最外层到最内层的祖先链。
+  //
+  // 例如，文档中依次出现：h1="第一章" → h2="1.1" → h3="1.1.1" → h2="1.2" → h3="1.2.1"
+  // 当用户阅读到 h3="1.2.1" 时：
+  //   遇到 h1="第一章" → stack = ["第一章", -, -, -, -, -]
+  //   遇到 h2="1.1"    → stack = ["第一章", "1.1", -, -, -, -]
+  //   遇到 h3="1.1.1"  → stack = ["第一章", "1.1", "1.1.1", -, -, -]
+  //   遇到 h2="1.2"    → stack = ["第一章", "1.2", -, -, -, -]  ← 1.1 和 1.1.1 被清除
+  //   遇到 h3="1.2.1"  → stack = ["第一章", "1.2", "1.2.1", -, -, -]
+  //   最终输出 → ["第一章", "1.2", "1.2.1"]
+
+  const stack: Array<string | null> = [null, null, null, null, null, null]; // 对应 h1-h6
+  for (const { level, text } of rawPreceding) {
+    const idx = level - 1; // h1→0, h2→1, ...
+    stack[idx] = text;
+    // 清空比当前标题更深的层级（它们属于之前兄弟节点的子内容）
+    for (let i = idx + 1; i < 6; i++) stack[i] = null;
+  }
+
+  // 输出非空层级，从最外层到最内层排列。
+  const out = stack.filter((s): s is string => s !== null);
+
+  // 如果没有找到任何前序标题，至少返回第一个非空标题。
   if (out.length === 0) {
     for (const h of headings) {
       const t = (h.textContent ?? '').trim();
