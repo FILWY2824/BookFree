@@ -1,74 +1,32 @@
 /*
 中文导读：
-TocDrawer 是阅读器中的“目录抽屉”组件，用于展示一本书的章节目录并支持跳转。
-它通常接收章节列表、当前章节位置、关闭回调和章节点击回调。
-这个组件只负责目录 UI 和用户点击，不应该自己去解析书籍或请求章节正文。
-如果你想改目录层级缩进、当前章节高亮、抽屉打开/关闭样式，优先看这里。
-如果你想改变目录数据从哪里来，需要去 ReaderPage、后端 chapters 接口或具体 parser 中查看。
-*/
+TocDrawer 是阅读器中的"目录抽屉"组件，用于展示一本书的章节目录并支持跳转。
 
-// Table-of-contents drawer — permanently docked.
-//
-// Rewrite (per Round-3 user feedback):
-//
-//   ─ Foldable tree.
-//     Every node with children gets a chevron toggle. The flat-list
-//     rendering of the previous version made it impossible to fold
-//     long sections away — and made deeply-nested books feel
-//     unnavigable. Each parent now shows a `▸` / `▾` glyph; clicking
-//     the glyph (or pressing Enter on it) toggles its subtree.
-//     Clicking the LABEL still navigates as before so users with
-//     "I just want to jump to this chapter" muscle memory aren't
-//     hijacked by the new affordance.
-//
-//   ─ Auto-expand active branch.
-//     The parent passes `activePath` (an ordered list of ancestor
-//     labels from root → current section). Every node on that path
-//     is forced expanded for the duration the user is in that
-//     section, so the highlighted row is always visible without the
-//     user having to manually fold things open. User-toggled state
-//     is layered on top: if you EXPAND a node the active path
-//     doesn't touch, it stays expanded; if you COLLAPSE a node on
-//     the active path, the auto-expand wins until you navigate away.
-//
-//   ─ Track to ancestor.
-//     The flat `activeChapterId` / `activeLabel` matching from the
-//     previous version still works, but now we ALSO accept a path.
-//     If the parent matched a deeper heading against a shallower
-//     TOC entry (e.g. user is in section "1.2.1" but TOC tops out
-//     at "1.2"), the activeLabel is the matched ancestor — and that
-//     ancestor's row is highlighted.
-//
-//   ─ Hierarchical depth respected.
-//     The previous version flattened with `depth * 14px` indentation
-//     but rendered every node clickable as a single list item. The
-//     new version preserves the tree shape, which means the auto-
-//     expand can do something meaningful and indentation reads as
-//     real hierarchy rather than a visual hint.
+颠覆式重构（v3）：
+- 默认所有节点都展开。这是用户最常需要的状态——一进来就能看到全部层级。
+- 用户可以点击展开/收起箭头主动收起某个分支；这种用户偏好会被记忆。
+- 当前阅读位置所在的"活跃路径"上的所有节点强制展开（即使用户曾收起），
+  保证用户始终能看到自己阅读到哪儿。
+- 活跃叶子节点（最深匹配项）显示强高亮；其所有上级节点显示弱"祖先"高亮，
+  这样多层目录里也能立刻看清当前在哪一支。
+- 激活节点变化时自动滚动到视野中央。
+
+数据契约：
+- items：层级目录树
+- activeChapterId：当前正在阅读的章节 ID
+- activeLabel：在目录中匹配到的最深节点 label（用于强高亮）
+- activePath：从根到匹配节点的全部 label 链（用于祖先高亮 + 自动展开）
+*/
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TocItem } from '../lib/toc';
 
 interface Props {
   items: TocItem[];
-  /** Active chapter id from the spine — used as the LAST-RESORT
-   *  match when we couldn't match the heading text against the TOC.
-   *  Many books have multiple TOC sections per chapter file, so the
-   *  chapterId match alone isn't enough; see activeLabel/activePath. */
   activeChapterId: string | null;
-  /** Active TOC entry label (the deepest matched node's label). When
-   *  given, we prefer label match over chapterId match — the same
-   *  chapterId can map to several rows but the label is unique per
-   *  row. */
   activeLabel?: string | null;
-  /** Path of TOC labels from root → matched node, used to auto-
-   *  expand every parent on the way down. Empty when no heading
-   *  matched the TOC at all (in which case nothing is force-
-   *  expanded). */
   activePath?: string[];
   onPick: (chapterId: string) => void;
-  /** Counter incremented by the parent whenever the user clicks the
-   *  in-drawer "定位" button. */
   locateTick: number;
   onLocateRequest: () => void;
 }
@@ -80,32 +38,32 @@ export default function TocDrawer({
   const listRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLDivElement>(null);
 
-  // User-toggled expand/collapse state. Keyed by the same path-string
-  // we use for the auto-expand set, so the two layers compose
-  // cleanly. `null` value = follow the auto-expand default; `true` /
-  // `false` = explicit user override.
-  const [userToggle, setUserToggle] = useState<Record<string, boolean>>({});
+  // 用户主动收起的节点集合。键为节点路径字符串。
+  // 默认展开 = 不在此集合中。用户点击收起 → 加入集合。再次点击展开 → 从集合移除。
+  const [userCollapsed, setUserCollapsed] = useState<Set<string>>(() => new Set());
 
-  // Auto-expand set — every label on the active path is in here, plus
-  // all labels equal to or above the active row. Recomputed when the
-  // active path changes. We use a Set of the FULL path-keys so labels
-  // that repeat at different depths don't collide.
-  const autoExpandKeys = useMemo(() => {
+  // 活跃路径上每一级节点的路径键集合，这些节点强制展开（覆盖用户收起）。
+  // 例如 activePath = ["A","B","C"] → 集合 = {"A", "A>B", "A>B>C"}。
+  const forceExpandedKeys = useMemo(() => {
     const s = new Set<string>();
     let acc = '';
     for (const lbl of activePath) {
-      acc = acc ? acc + ' ▸ ' + lbl : lbl;
+      acc = acc ? acc + '>' + lbl : lbl;
       s.add(acc);
     }
     return s;
   }, [activePath]);
 
-  // When the active path changes, we don't WIPE userToggle — we just
-  // ensure freshly-active branches default to expanded. User overrides
-  // for OFF-path branches survive across navigations, which is the
-  // expected behaviour for a long reading session.
+  const toggle = (pathKey: string) => {
+    setUserCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(pathKey)) next.delete(pathKey);
+      else next.add(pathKey);
+      return next;
+    });
+  };
 
-  // Locate button — scroll the active row into view.
+  // "定位"按钮：把活跃行滚到视野中央。
   useEffect(() => {
     if (locateTick === 0) return;
     const el = activeRef.current;
@@ -113,40 +71,28 @@ export default function TocDrawer({
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, [locateTick]);
 
-  // When the active branch changes, also auto-scroll the active row
-  // into view (smoothly) so the user's current position is always
-  // visible. This is what "TOC tracks the reader" actually feels
-  // like in practice — the previous version highlighted the row but
-  // didn't keep it visible, so a fast-flipped chapter could land off-
-  // screen and the user would think tracking had failed.
+  // 活跃节点变化 → 自动滚动到视野中（如已可见则不动）。
   useEffect(() => {
-    const el = activeRef.current;
-    if (!el) return;
-    // 使用 requestAnimationFrame 确保 DOM 已经更新（展开/折叠动画完成后）
-    // 再执行滚动，避免滚动目标不可见。
-    requestAnimationFrame(() => {
-      const e = activeRef.current;
-      if (!e) return;
-      // `nearest` so we don't jerk the scroll when the active row is
-      // already visible — only correct when it's actually off-screen.
-      e.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const id = window.requestAnimationFrame(() => {
+      const el = activeRef.current;
+      if (!el) return;
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
+    return () => window.cancelAnimationFrame(id);
   }, [activeLabel, activeChapterId]);
 
-  // 首次有数据时自动滚动到活跃章节。
-  // 当从书架进入阅读页时，可能需要等目录和活跃章节数据都加载完才能定位。
+  // 首次挂载且数据齐全时滚到中央。
   const initialScrollDone = useRef(false);
   useEffect(() => {
     if (initialScrollDone.current) return;
-    if (items.length === 0 || !activeChapterId) return;
+    if (items.length === 0 || (!activeChapterId && !activeLabel)) return;
     initialScrollDone.current = true;
-    // 延迟执行，确保 DOM 已渲染完毕
-    const timer = window.setTimeout(() => {
+    const t = window.setTimeout(() => {
       const el = activeRef.current;
       if (el) el.scrollIntoView({ block: 'center', behavior: 'auto' });
-    }, 100);
-    return () => window.clearTimeout(timer);
-  }, [items, activeChapterId]);
+    }, 120);
+    return () => window.clearTimeout(t);
+  }, [items, activeChapterId, activeLabel]);
 
   return (
     <aside
@@ -165,11 +111,11 @@ export default function TocDrawer({
         <button
           type="button"
           onClick={onLocateRequest}
-          disabled={!activeChapterId}
+          disabled={!activeChapterId && !activeLabel}
           className="flex items-center gap-1 px-2 py-1 rounded-md text-xs"
           style={{
-            background: activeChapterId ? 'rgba(0,0,0,0.05)' : 'transparent',
-            opacity: activeChapterId ? 1 : 0.4,
+            background: (activeChapterId || activeLabel) ? 'rgba(0,0,0,0.05)' : 'transparent',
+            opacity: (activeChapterId || activeLabel) ? 1 : 0.4,
             color: 'var(--reader-fg)',
           }}
           title="定位到当前章节"
@@ -198,9 +144,9 @@ export default function TocDrawer({
             pathKey={it.label}
             activeChapterId={activeChapterId}
             activeLabel={activeLabel ?? null}
-            autoExpandKeys={autoExpandKeys}
-            userToggle={userToggle}
-            setUserToggle={setUserToggle}
+            forceExpandedKeys={forceExpandedKeys}
+            userCollapsed={userCollapsed}
+            onToggle={toggle}
             onPick={onPick}
             activeRef={activeRef}
           />
@@ -216,44 +162,39 @@ interface NodeProps {
   pathKey: string;
   activeChapterId: string | null;
   activeLabel: string | null;
-  autoExpandKeys: Set<string>;
-  userToggle: Record<string, boolean>;
-  setUserToggle: (fn: (prev: Record<string, boolean>) => Record<string, boolean>) => void;
+  forceExpandedKeys: Set<string>;
+  userCollapsed: Set<string>;
+  onToggle: (pathKey: string) => void;
   onPick: (chapterId: string) => void;
-  activeRef: React.MutableRefObject<HTMLDivElement | null>;
+  activeRef: React.RefObject<HTMLDivElement>;
 }
 
 function TocNode({
   item, depth, pathKey, activeChapterId, activeLabel,
-  autoExpandKeys, userToggle, setUserToggle, onPick, activeRef,
+  forceExpandedKeys, userCollapsed, onToggle, onPick, activeRef,
 }: NodeProps) {
   const hasChildren = !!(item.children && item.children.length);
 
-  // Determine whether the row is the "active" one (highlighted).
-  // Label match wins; chapterId match is the fallback. We check
-  // only when there IS a current label or id, so empty inputs
-  // can't match an empty TOC label.
+  // 高亮判定（活跃叶子）：标签匹配优先；标签为空或没匹配时退回到 chapterId 匹配。
   const isActive = (() => {
     if (activeLabel && item.label === activeLabel) return true;
     if (!activeLabel && activeChapterId && item.chapterId === activeChapterId) return true;
     return false;
   })();
 
-  // isAncestor：当前节点是活跃路径上的祖先节点（但不是叶子节点本身）。
-  // 祖先节点需要二级高亮，以便用户看到三级、四级子目录时，
-  // 其上级目录标题在目录树中也保持视觉高亮，不脱离目录追踪。
-  const isAncestor = !isActive && autoExpandKeys.has(pathKey);
+  // 祖先判定：当前节点在活跃路径上但不是叶子。
+  const isAncestor = !isActive && forceExpandedKeys.has(pathKey);
 
-  const userPref = userToggle[pathKey];
-  const autoExpanded = autoExpandKeys.has(pathKey);
-  const expanded = autoExpanded || userPref !== false;
+  // 展开判定：默认展开；若用户主动收起且不在活跃路径上，则收起。
+  // 活跃路径强制展开，覆盖用户收起。
+  const expanded = forceExpandedKeys.has(pathKey) || !userCollapsed.has(pathKey);
 
   const clickable = !!item.chapterId;
 
-  const toggle = (e: React.MouseEvent | React.KeyboardEvent) => {
+  const handleChevron = (e: React.MouseEvent | React.KeyboardEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setUserToggle(prev => ({ ...prev, [pathKey]: !expanded }));
+    onToggle(pathKey);
   };
 
   return (
@@ -263,7 +204,6 @@ function TocNode({
         className="toc-row"
         data-active={isActive ? '1' : isAncestor ? 'ancestor' : undefined}
         style={{
-          // Indent by depth: 14px per level, plus 8px gutter.
           paddingLeft: 8 + depth * 14 + 'px',
           background: isActive
             ? 'var(--reader-accent)'
@@ -271,21 +211,18 @@ function TocNode({
               ? 'var(--reader-accent-weak, rgba(124,90,58,0.12))'
               : 'transparent',
           color: isActive ? '#fff' : 'var(--reader-fg)',
-          // 祖先节点左侧加一条细线，表示当前阅读位置在这条路径上
           borderLeft: isAncestor
             ? '2px solid var(--reader-accent)'
             : '2px solid transparent',
         }}
       >
-        {/* Chevron — only for parents. We render a placeholder for
-            leaves so labels at the same depth align horizontally. */}
         {hasChildren ? (
           <button
             type="button"
             className="toc-chevron"
-            onClick={toggle}
+            onClick={handleChevron}
             onKeyDown={(e: React.KeyboardEvent) => {
-              if (e.key === 'Enter' || e.key === ' ') toggle(e);
+              if (e.key === 'Enter' || e.key === ' ') handleChevron(e);
             }}
             aria-expanded={expanded}
             aria-label={expanded ? '收起' : '展开'}
@@ -312,7 +249,7 @@ function TocNode({
           title={item.label}
           style={{
             color: 'inherit',
-            opacity: clickable || isActive ? 1 : 0.65,
+            opacity: clickable || isActive || isAncestor ? 1 : 0.65,
             cursor: clickable ? 'pointer' : 'default',
           }}
         >
@@ -327,12 +264,12 @@ function TocNode({
               key={(child.chapterId ?? 'h') + ':' + idx}
               item={child}
               depth={depth + 1}
-              pathKey={pathKey + ' ▸ ' + child.label}
+              pathKey={pathKey + '>' + child.label}
               activeChapterId={activeChapterId}
               activeLabel={activeLabel}
-              autoExpandKeys={autoExpandKeys}
-              userToggle={userToggle}
-              setUserToggle={setUserToggle}
+              forceExpandedKeys={forceExpandedKeys}
+              userCollapsed={userCollapsed}
+              onToggle={onToggle}
               onPick={onPick}
               activeRef={activeRef}
             />

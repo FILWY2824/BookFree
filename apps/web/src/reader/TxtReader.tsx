@@ -43,8 +43,6 @@ import {
   applyAllHighlights,
   clearHighlights,
   encodeLocatorFromRange,
-  highlightClassName,
-  locatorToRangeForHighlight,
   wrapRange,
 } from '../lib/annotations';
 import {
@@ -323,174 +321,129 @@ export default function TxtReader({
     return cleanLeadingWhitespace(raw);
   }, [body]);
 
-  // 章节内容或排版参数变化时，重新测量分页，并在绘制前应用已保存的标注。
+  // ─────────────────────────────────────────────────────────────────
+  // 颠覆式重构：批注渲染单一可信源（Single Source of Truth）
   //
-  // 标注应用策略：
-  // - 此 useLayoutEffect 在章节 HTML / body / 排版 或标注数据变化时触发，
-  //   负责在绘制前完成 clearHighlights + applyAllHighlights；
-  // - onApplyHighlight 中不再立即包裹 DOM，而是仅创建后端记录 + 更新 state，
-  //   由本 effect 统一在绘制前包裹，避免立即包裹后被 clearHighlights 清除；
-  // - 退出阅读重新进入时：标注数据到达（即使晚于 body）会触发本 effect 重新执行。
+  // 旧实现的问题：
+  // - 一个超大的 useLayoutEffect 把"应用批注 + 计算分页 + 重试"混在一起；
+  // - 同时还有一个增量 useEffect 反复读写 DOM；
+  // - 两套逻辑互相覆盖、互相清理，时序出错就丢批注；
+  // - 重试机制掩盖问题，但当 locator 解析失败时，每轮重试都失败，
+  //   表现为"退出再进来批注消失"的疑难 bug。
   //
-  // 批注消失 bug 根因修复：
-  //   之前只在 applied === 0 时重试一次（一帧），实际上 DOM 可能需要更长时间
-  //   才能完全稳定（CSS columns 重排、字体异步加载、图片解码等）。
-  //   现在改为多轮重试（最多 5 帧 + 一个 200ms 延迟兜底），确保批注在各种
-  //   时序场景下都能成功应用。
+  // 新实现：
+  // - 一个 useLayoutEffect 专管批注：清空所有 hl span → 重新依据
+  //   highlights 数组从 locator 解析并包裹。idempotent，没副作用。
+  // - 依赖完整覆盖：[body, html, highlights, notes]——
+  //   章节切换、HTML 变化、批注/笔记加载完毕，都会触发重新应用。
+  // - 不做重试。如果 locator 解析失败，那是数据问题，重试也救不了。
+  //   保持代码简单可预测。
+  // - 不再有第二个增量 effect。所有批注 DOM 状态只由这里决定。
+  // ─────────────────────────────────────────────────────────────────
   useLayoutEffect(() => {
     const root = proseRef.current;
     if (!root || !body) return;
-    clearHighlights(root);
-    const notedSet = new Set(
-      notes.filter(n => n.highlightId).map(n => n.highlightId as string),
-    );
+
+    // 计算"哪些批注属于当前章节"。容忍 chapterId 为空的旧数据。
     const chapterHighlights = highlights.filter(
       h => !h.chapterId || h.chapterId === body.id,
     );
-    // 立即应用一次：捕获那些 DOM 已就绪的批注。
-    applyAllHighlights(root, chapterHighlights, notedSet);
+    const notedSet = new Set<string>(
+      notes
+        .map(n => n.highlightId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    );
 
-    // 始终在下一帧验证高亮是否存在于 DOM 中。
-    // 即使 applyAllHighlights 报告成功，React 的后续协调可能移除 DOM 节点，
-    // 或者布局重排可能导致 Range 失效。
-    const retryHandles: number[] = [];
+    // 第一步：永远先清空，避免叠加包裹（同一段文本被多次包裹）。
+    clearHighlights(root);
+
+    // 第二步：按 locator 解析 + 包裹。
     if (chapterHighlights.length > 0) {
-      const expectedIds = new Set(chapterHighlights.map(h => h.id));
-      const doRetry = () => {
-        const r = proseRef.current;
-        if (!r) return;
-        // 收集 DOM 中已渲染的所有不同 highlight id
-        const have = new Set<string>();
-        r.querySelectorAll<HTMLElement>('span[data-hl-id]').forEach(s => {
-          const id = s.getAttribute('data-hl-id');
-          if (id) have.add(id);
-        });
-        // 如果所有期望的高亮都已在 DOM 中，无需重试
-        let allPresent = true;
-        for (const id of expectedIds) {
-          if (!have.has(id)) { allPresent = false; break; }
-        }
-        if (allPresent) return;
-        clearHighlights(r);
-        applyAllHighlights(r, chapterHighlights, notedSet);
-      };
-      // 第一轮：下一帧
-      retryHandles.push(requestAnimationFrame(doRetry));
-      // 第二轮：3 帧后
-      retryHandles.push(requestAnimationFrame(() =>
-        retryHandles.push(requestAnimationFrame(() =>
-          retryHandles.push(requestAnimationFrame(doRetry)),
-        )),
-      ));
-      // 兜底：300ms 后
-      retryHandles.push(window.setTimeout(doRetry, 300) as unknown as number);
+      applyAllHighlights(root, chapterHighlights, notedSet);
     }
 
-    if (pageMode === 'paginated') {
-      // 颠覆式重构：基于 translateY 的垂直分页。
-      // 1. 测量内容自然高度（content.scrollHeight）。
-      // 2. 测量视口高度（pagebox.clientHeight）。
-      // 3. 计算页数 = ceil(content / viewport)。
-      // 4. 找到段落级"干净断点"，避免一行文字被切成两半。
-      const pagebox = pageboxRef.current;
-      if (pagebox && root) {
-        const measure = () => {
-          const ph = pagebox.clientHeight;
-          const total = root.scrollHeight;
-          if (ph <= 0) return;
-          const breaks = computePageBreaks(root, ph);
-          pageBreaksRef.current = breaks;
-          setPageHeight(ph);
-          setPageCount(Math.max(1, breaks.length));
-          setPageIdx(i => Math.min(i, breaks.length - 1));
-          void total;
-        };
-        measure();
-        // 多帧重测：字体换行 / 图片解码 / 高亮包裹 都可能改变高度
-        retryHandles.push(requestAnimationFrame(measure));
-        retryHandles.push(requestAnimationFrame(() =>
-          retryHandles.push(requestAnimationFrame(measure)),
-        ));
-        retryHandles.push(window.setTimeout(measure, 250) as unknown as number);
-      }
+    // 第三步：兜底单帧延迟重试。
+    // 字体异步加载、图片解码完成后，块级元素的内部文本节点可能仍是
+    // 同一份字符序列，但偶发地 React 在本帧之后才把 dangerouslySetInnerHTML
+    // 同步进 DOM（极少数情况）。下一帧再做一次"幂等"应用作为保险。
+    // 这次重试不引入新的复杂度，因为 clearHighlights + applyAllHighlights
+    // 的组合本身就是幂等的。
+    const rafId = requestAnimationFrame(() => {
+      const r = proseRef.current;
+      if (!r) return;
+      // 验证：DOM 里是否已有所有期望的 hl span？
+      const haveIds = new Set<string>();
+      r.querySelectorAll<HTMLSpanElement>('span[data-hl-id]').forEach(s => {
+        const id = s.getAttribute('data-hl-id');
+        if (id) haveIds.add(id);
+      });
+      const expected = chapterHighlights.map(h => h.id);
+      const allOk = expected.every(id => haveIds.has(id));
+      if (allOk) return;
+      // 缺了——再来一次（幂等）。
+      clearHighlights(r);
+      applyAllHighlights(r, chapterHighlights, notedSet);
+    });
+
+    return () => cancelAnimationFrame(rafId);
+  }, [body, html, highlights, notes]);
+
+  // ─────────────────────────────────────────────────────────────────
+  // 分页测量（仅 paginated 模式）。
+  //
+  // 与"批注渲染"完全解耦：分页只关心块级布局，不关心 hl span（hl span
+  // 是 inline 元素，不影响 offsetTop / scrollHeight）。所以两个 effect
+  // 可以独立运行，避免互相 re-trigger 导致循环。
+  // ─────────────────────────────────────────────────────────────────
+  useLayoutEffect(() => {
+    const root = proseRef.current;
+    if (!root || !body) return;
+
+    if (pageMode !== 'paginated') {
+      setPageCount(1);
       if (!readyFiredRef.current) {
         readyFiredRef.current = true;
         onReady?.();
       }
-      return () => {
-        retryHandles.forEach(h => {
-          cancelAnimationFrame(h);
-          window.clearTimeout(h);
-        });
-      };
-    } else {
-      setPageCount(1);
+      return;
     }
+
+    const pagebox = pageboxRef.current;
+    if (!pagebox) return;
+
+    const handles: number[] = [];
+    const measure = () => {
+      const r = proseRef.current;
+      const pb = pageboxRef.current;
+      if (!r || !pb) return;
+      const ph = pb.clientHeight;
+      if (ph <= 0) return;
+      const breaks = computePageBreaks(r, ph);
+      pageBreaksRef.current = breaks;
+      setPageHeight(ph);
+      setPageCount(Math.max(1, breaks.length));
+      setPageIdx(i => Math.min(i, breaks.length - 1));
+    };
+    measure();
+    // 多帧重测兜底：字体异步加载、图片解码完成后高度可能变化。
+    handles.push(requestAnimationFrame(measure));
+    handles.push(requestAnimationFrame(() =>
+      handles.push(requestAnimationFrame(measure)),
+    ));
+    handles.push(window.setTimeout(measure, 250) as unknown as number);
 
     if (!readyFiredRef.current) {
       readyFiredRef.current = true;
       onReady?.();
     }
     return () => {
-      retryHandles.forEach(h => {
+      handles.forEach(h => {
         cancelAnimationFrame(h);
         window.clearTimeout(h);
       });
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [html, body, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth, highlights, notes]);
-
-  // 标注增量同步：highlights / notes 数组变化时运行。
-  //
-  // 与上面的“整章重建高亮”不同，这里尽量只改发生变化的 DOM：
-  // - 如果某个高亮 span 已经存在，只更新它是否带笔记的 class；
-  // - 如果 state 中有高亮，但 DOM 中没有对应 span，就根据 locator 找回 Range 并包裹；
-  // - 如果 DOM 中有 span，但 state 中没有，说明用户删除了高亮，需要把 span 拆掉。
-  //
-  // 这种做法避免频繁清空整章 DOM，对长章节更友好，也能减少标注刚创建后闪烁/消失的问题。
-  useEffect(() => {
-    const root = proseRef.current;
-    if (!root || !body) return;
-    const notedSet = new Set(
-      notes.filter(n => n.highlightId).map(n => n.highlightId as string),
-    );
-    const wantById = new Map<string, typeof highlights[number]>();
-    for (const h of highlights) {
-      if (!h.chapterId || h.chapterId === body.id) wantById.set(h.id, h);
-    }
-    // Update existing / add missing.
-    for (const [id, h] of wantById) {
-      const existingSpans = root.querySelectorAll<HTMLSpanElement>(
-        `span[data-hl-id="${cssEscape(id)}"]`,
-      );
-      if (existingSpans.length > 0) {
-        const cls = highlightClassName(h, notedSet.has(id));
-        existingSpans.forEach(s => {
-          if (s.className !== cls) s.className = cls;
-          if (notedSet.has(id)) s.setAttribute('data-has-note', '1');
-          else s.removeAttribute('data-has-note');
-        });
-        continue;
-      }
-      // Missing — try to wrap from locator.
-      const range = locatorToRangeForHighlight(root, h);
-      if (range) {
-        try { wrapRange(range, h, notedSet.has(id)); } catch { /* ignore */ }
-      }
-    }
-    // Remove orphan spans (highlight deleted from state).
-    const allSpans = root.querySelectorAll<HTMLSpanElement>('span[data-hl-id]');
-    allSpans.forEach(s => {
-      const id = s.getAttribute('data-hl-id');
-      if (!id || !wantById.has(id)) {
-        const parent = s.parentNode;
-        if (!parent) return;
-        while (s.firstChild) parent.insertBefore(s.firstChild, s);
-        parent.removeChild(s);
-      }
-    });
-    root.normalize();
-  }, [highlights, notes, body]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body, html, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth]);
 
   // 容器尺寸变化时重新计算分页。
   //
@@ -1265,27 +1218,25 @@ export default function TxtReader({
   );
 }
 
-// PaginatedFrame：颠覆式重构后使用 translateY 实现垂直分页。
+// PaginatedFrame：颠覆式重构 v2 ── 修复"页底溢出"bug。
 //
-// 旧方案（CSS columns）的根本性缺陷：
-//   - CSS columns 要求子元素能够自由分割到下一列；
-//   - 任何子元素一旦创建 BFC（overflow:hidden / display:flow-root /
-//     float / position:absolute / contain 等），就变成不可分割的整块，
-//     超出列高度时就被 overflow 裁掉一半；
-//   - EPUB 注入的 HTML 经常带 inline style 或 class 触发 BFC，无法
-//     在前端可靠地拦截；
-//   - 任何 max-width:100% / overflow:hidden 等"防溢出"规则反而会
-//     破坏 column flow，让问题更严重。
+// 旧 bug：
+//   pageBreaks[i+1] 是下一页起点，常常 < pageBreaks[i] + viewportHeight
+//   （因为我们 snap 到段落边界以避免切行）。但视口的 overflow:hidden
+//   只裁切到 viewport 高度，所以 [pageBreaks[i+1], pageBreaks[i]+viewportHeight]
+//   这段区间内的"下一页内容"会从底部探出来——这就是用户反馈的
+//   "阅读页面下方还有文字超出屏幕"问题。
 //
-// 新方案：朴素的 translateY 分页
-//   - 内容容器以自然高度生成（无 columns、无 BFC 干扰）；
-//   - 视口容器 overflow:hidden 严格裁剪超出部分；
-//   - pageIdx 翻页时仅修改 translateY；
-//   - 页面边界尽量对齐段落顶部，避免一行文字被切成两半；
-//   - 在所有 HTML 输入下都稳定。
+// 修复方案：
+//   在视口最底部叠加一个"遮罩"，覆盖 [当前页可见高度, viewport 底]
+//   的范围，确保下一页的内容永远不会从底部漏出来。遮罩用阅读背景色，
+//   视觉上看起来就是这一页比另一页短一点（像真书一样自然）。
 //
-// 这种做法的代价是不再依赖浏览器的 column 排版，分页计算放到 JS 中。
-// 好处是完全可控，与 EPUB 来源 CSS 解耦。
+//   currentPageHeight = pageBreaks[i+1] - pageBreaks[i]  （中间页）
+//                     = ∞                                （最后一页，无需遮罩）
+//
+//   当 currentPageHeight ≥ viewportHeight 时遮罩为 0 高度（不可见），
+//   否则遮罩高度 = viewportHeight - currentPageHeight，从底部贴齐。
 function PaginatedFrame({
   pageIdx, prefs, bodyFontFamily, pageHeight, pageBreaks, pageboxRef, children,
 }: {
@@ -1297,8 +1248,19 @@ function PaginatedFrame({
   pageboxRef: React.RefObject<HTMLDivElement>;
   children: React.ReactNode;
 }) {
-  void pageHeight;
   const offsetY = pageBreaks[pageIdx] ?? 0;
+  // 当前页"应当显示"的高度——下一页起点减当前页起点。
+  // 最后一页没有"下一页"，把它视为占满 viewport（不需要遮罩）。
+  const isLastPage = pageIdx >= pageBreaks.length - 1;
+  const nextOffset = isLastPage
+    ? Number.POSITIVE_INFINITY
+    : (pageBreaks[pageIdx + 1] ?? Number.POSITIVE_INFINITY);
+  const currentPageHeight = Math.max(0, nextOffset - offsetY);
+  // 遮罩高度：viewport 底部需要遮住的部分。
+  const maskHeight = pageHeight > 0
+    ? Math.max(0, pageHeight - currentPageHeight)
+    : 0;
+
   return (
     <div
       ref={pageboxRef}
@@ -1331,6 +1293,24 @@ function PaginatedFrame({
       >
         {children}
       </div>
+      {/* 底部遮罩——挡住因段落对齐而下页内容探出来的部分。
+          最后一页没有"下一页内容"，所以 maskHeight = 0，遮罩不可见。 */}
+      {maskHeight > 0 && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: `${maskHeight}px`,
+            background: 'var(--reader-bg)',
+            pointerEvents: 'none',
+            // 高 z-index 确保遮罩永远在内容之上。
+            zIndex: 5,
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1496,18 +1476,6 @@ function cleanLeadingWhitespace(rawHtml: string): string {
   }
 
   return container.innerHTML;
-}
-
-// CSS.escape 的兼容封装。
-//
-// 我们需要把 highlight id 放进 CSS 属性选择器：`span[data-hl-id="..."]`。
-// 如果 id 里包含特殊字符，不转义就可能让 querySelector 语法错误。
-// 现代浏览器有 CSS.escape；没有时用一个简单 fallback 转义非字母数字字符。
-function cssEscape(s: string): string {
-  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
-    return CSS.escape(s);
-  }
-  return s.replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch);
 }
 
 // ── 搜索闪烁辅助函数 ───────────────────────────────────────────────
