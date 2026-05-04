@@ -4,7 +4,8 @@
       "Bash(npm:*)",
       "Bash(go version:*)",
       "Bash(echo \"exit: $?\")",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(cmd:*)"
     ]
   }
 }
