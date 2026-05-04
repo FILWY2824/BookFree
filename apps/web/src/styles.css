@@ -96,6 +96,17 @@ body {
   margin-top: 1em;
 }
 .reader-prose img { max-width: 100%; height: auto; margin: 1em auto; display: block; }
+/* 滚动模式下也需要防止 EPUB 注入的样式导致内容溢出 */
+.reader-prose div,
+.reader-prose section,
+.reader-prose article {
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+.reader-prose img {
+  max-height: 80vh;
+  object-fit: contain;
+}
 .reader-prose blockquote {
   border-left: 3px solid var(--reader-border);
   padding-left: 1em;
@@ -117,6 +128,13 @@ body {
   background: var(--reader-border);
   padding: 1em;
   border-radius: 0.5em;
+  overflow-x: auto;
+  max-width: 100%;
+}
+/* 表格在滚动模式下也不能超出容器 */
+.reader-prose table {
+  max-width: 100%;
+  display: block;
   overflow-x: auto;
 }
 
@@ -146,6 +164,20 @@ body {
   /* 防止分页模式下内容溢出：长字符串、表格、预格式化文本不能超出列边界。 */
   overflow-wrap: break-word;
   word-break: break-word;
+}
+/* ── 分页模式溢出防御 ──
+   CSS columns 只在水平方向分列，垂直方向上的溢出不会被自动裁剪。
+   必须在 track 和内容层都做防御，确保任何子元素不能逃出阅读区域。 */
+.reader-paginated-track {
+  overflow: hidden;
+}
+/* 所有 EPUB/章节 HTML 注入的后代元素都不允许超出容器边界。
+   这是防止 EPUB 自带 CSS（如 position:absolute, min-height, overflow:visible）
+   导致文字出现在阅读区域之外的关键规则。 */
+.reader-paginated *,
+.reader-paginated-track * {
+  max-width: 100% !important;
+  box-sizing: border-box;
 }
 .reader-paginated p { margin: 1em 0; }
 .reader-paginated h1, .reader-paginated h2, .reader-paginated h3 {
@@ -179,7 +211,26 @@ body {
   break-inside: avoid;
   max-width: 100%;
 }
-.reader-paginated img { height: auto; }
+/* 图片在分页模式下绝对不能超出列高度，否则会溢出到页面底部。 */
+.reader-paginated img {
+  height: auto;
+  max-height: 90vh;
+  object-fit: contain;
+}
+/* 强制所有行内样式中可能包含的 position 和 overflow 不能逃逸 */
+.reader-paginated div,
+.reader-paginated section,
+.reader-paginated article,
+.reader-paginated aside,
+.reader-paginated figure {
+  position: static !important;
+  overflow: hidden;
+  max-height: none;
+}
+/* 但允许 hl 高亮 span 保持 position:relative（用于笔记图标等） */
+.reader-paginated span[data-hl-id] {
+  position: relative !important;
+}
 .reader-paginated blockquote {
   border-left: 3px solid var(--reader-border);
   padding-left: 1em;
@@ -191,6 +242,8 @@ body {
   padding: 1em;
   border-radius: 0.5em;
   overflow-x: auto;
+  /* pre 元素在分页模式下限制最大高度，防止超长代码块撑破列边界 */
+  max-height: 80vh;
 }
 
 /* ─────────────────────────────────────────────────────────────────

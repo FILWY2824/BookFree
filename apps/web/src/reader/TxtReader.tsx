@@ -179,7 +179,12 @@ export default function TxtReader({
   // scrollRef 指向最外层滚动容器。滚动模式下用于监听 scrollTop、滚动到顶部等。
   const scrollRef = useRef<HTMLDivElement>(null);
   // proseRef 指向真正承载正文 HTML 的 DOM 节点。标注、搜索高亮、进度定位都围绕它做。
+  // 在分页模式下，proseRef 直接包含 dangerouslySetInnerHTML 的内容。
+  // 在滚动模式下，proseRef 指向内层 div（只包含章节 HTML），不包含标题和页脚。
   const proseRef = useRef<HTMLDivElement>(null);
+  // scrollProseRef 指向滚动模式下的外层容器（包含标题、正文、页脚），
+  // 仅用于 onClick 事件代理。proseRef 才是批注和定位的操作根节点。
+  const scrollProseRef = useRef<HTMLDivElement>(null);
   // 分页状态：pageIdx 是当前页索引，pageCount 是当前章节计算出来的总页数。
   const [pageIdx, setPageIdx] = useState(0);
   const [pageCount, setPageCount] = useState(1);
@@ -309,6 +314,12 @@ export default function TxtReader({
   // - onApplyHighlight 中不再立即包裹 DOM，而是仅创建后端记录 + 更新 state，
   //   由本 effect 统一在绘制前包裹，避免立即包裹后被 clearHighlights 清除；
   // - 退出阅读重新进入时：标注数据到达（即使晚于 body）会触发本 effect 重新执行。
+  //
+  // 批注消失 bug 根因修复：
+  //   之前只在 applied === 0 时重试一次（一帧），实际上 DOM 可能需要更长时间
+  //   才能完全稳定（CSS columns 重排、字体异步加载、图片解码等）。
+  //   现在改为多轮重试（最多 5 帧 + 一个 200ms 延迟兜底），确保批注在各种
+  //   时序场景下都能成功应用。
   useLayoutEffect(() => {
     const root = proseRef.current;
     if (!root || !body) return;
@@ -321,18 +332,26 @@ export default function TxtReader({
     );
     const applied = applyAllHighlights(root, chapterHighlights, notedSet);
 
-    // 安全网：如果本轮有待应用的高亮但全部解析失败（DOM 可能还未完全就绪，
-    // 例如 dangerouslySetInnerHTML 刚渲染、CSS columns 尚未稳定），在下一帧
-    // 重新尝试一次。这解决了"退出再进来时批注消失"的问题——批注数据往往晚于
-    // body 到达，触发 useLayoutEffect 时 DOM 可能处于中间状态。
-    let retryRaf: number | undefined;
-    if (chapterHighlights.length > 0 && applied === 0) {
-      retryRaf = requestAnimationFrame(() => {
+    // 多轮重试机制：如果本轮有待应用的高亮但全部或部分解析失败，
+    // 通过 RAF + setTimeout 多次重试，确保批注在 DOM 稳定后能成功应用。
+    const retryHandles: number[] = [];
+    if (chapterHighlights.length > 0 && applied < chapterHighlights.length) {
+      const doRetry = () => {
         const r = proseRef.current;
         if (!r) return;
         clearHighlights(r);
         applyAllHighlights(r, chapterHighlights, notedSet);
-      });
+      };
+      // 快速重试：下一帧
+      retryHandles.push(requestAnimationFrame(doRetry));
+      // 中等重试：3 帧后（CSS columns / font swap 可能需要多帧才稳定）
+      retryHandles.push(requestAnimationFrame(() =>
+        retryHandles.push(requestAnimationFrame(() =>
+          retryHandles.push(requestAnimationFrame(doRetry)),
+        )),
+      ));
+      // 兜底重试：200ms 后（覆盖异步字体加载等场景）
+      retryHandles.push(window.setTimeout(doRetry, 200) as unknown as number);
     }
 
     if (pageMode === 'paginated') {
@@ -366,13 +385,16 @@ export default function TxtReader({
         setPageCount(pages);
         setPageIdx(i => Math.min(i, pages - 1));
       });
+      retryHandles.push(raf);
       if (!readyFiredRef.current) {
         readyFiredRef.current = true;
         onReady?.();
       }
       return () => {
-        cancelAnimationFrame(raf);
-        if (retryRaf !== undefined) cancelAnimationFrame(retryRaf);
+        retryHandles.forEach(h => {
+          cancelAnimationFrame(h);
+          window.clearTimeout(h);
+        });
       };
     } else {
       setPageCount(1);
@@ -382,9 +404,12 @@ export default function TxtReader({
       readyFiredRef.current = true;
       onReady?.();
     }
-    if (retryRaf !== undefined) {
-      return () => cancelAnimationFrame(retryRaf);
-    }
+    return () => {
+      retryHandles.forEach(h => {
+        cancelAnimationFrame(h);
+        window.clearTimeout(h);
+      });
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [html, body, pageMode, prefs.fontSize, prefs.lineHeight, prefs.fontFamily, prefs.columnWidth, highlights, notes]);
 
@@ -1158,7 +1183,7 @@ export default function TxtReader({
         ) : (
           <div
             className="reader-prose mx-auto px-10 py-14"
-            ref={proseRef}
+            ref={scrollProseRef}
             onClick={onProseClick}
             style={{
               maxWidth: columnMaxWidth(prefs),
@@ -1173,7 +1198,14 @@ export default function TxtReader({
                 {body.title && (
                   <h1 className="text-center" style={{ fontSize: '1.4em' }}>{body.title}</h1>
                 )}
-                <div dangerouslySetInnerHTML={{ __html: html }} />
+                {/* proseRef 只包裹章节 HTML 内容，不包含标题和页脚。
+                    这样 collectParagraphs/applyAllHighlights 等定位函数
+                    只在章节正文范围内操作，避免标题 h1 和页脚按钮干扰
+                    段落哈希匹配，从而修复退出再进入时批注消失的问题。 */}
+                <div
+                  ref={proseRef}
+                  dangerouslySetInnerHTML={{ __html: html }}
+                />
                 <ChapterFooter
                   canPrev={canPrevChapter}
                   canNext={canNextChapter}
@@ -1237,7 +1269,7 @@ function PaginatedFrame({
   return (
     <div
       className="h-full w-full"
-      style={{ overflow: 'hidden', boxSizing: 'border-box' }}
+      style={{ overflow: 'hidden', boxSizing: 'border-box', position: 'relative' }}
     >
       <div
         style={{
@@ -1250,6 +1282,13 @@ function PaginatedFrame({
           margin: '0 auto',
           boxSizing: 'border-box',
           overflow: 'hidden',
+          // 绝对定位 + inset:0 确保这一层完全填满视口，
+          // 不会因为内容膨胀而超出父容器。
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
         }}
       >
         <div
@@ -1271,6 +1310,12 @@ function PaginatedFrame({
             columnFill: 'auto',
             transform: `translateX(${-pageIdx * 100}%)`,
             transition: 'transform 220ms cubic-bezier(0.2, 0, 0, 1)',
+            // 关键修复：track 层也必须 overflow:hidden，
+            // 防止 CSS columns 内的内容在垂直方向溢出。
+            // 之前只有外层 viewport 和 padder 有 overflow:hidden，
+            // 但 track 本身没有，导致某些元素（如带 margin 的标题、
+            // 固定高度图片）可以垂直溢出到阅读区域以外。
+            overflow: 'hidden',
           }}
         >
           {children}

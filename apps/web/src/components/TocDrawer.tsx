@@ -122,10 +122,31 @@ export default function TocDrawer({
   useEffect(() => {
     const el = activeRef.current;
     if (!el) return;
-    // `nearest` so we don't jerk the scroll when the active row is
-    // already visible — only correct when it's actually off-screen.
-    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    // 使用 requestAnimationFrame 确保 DOM 已经更新（展开/折叠动画完成后）
+    // 再执行滚动，避免滚动目标不可见。
+    requestAnimationFrame(() => {
+      const e = activeRef.current;
+      if (!e) return;
+      // `nearest` so we don't jerk the scroll when the active row is
+      // already visible — only correct when it's actually off-screen.
+      e.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
   }, [activeLabel, activeChapterId]);
+
+  // 首次有数据时自动滚动到活跃章节。
+  // 当从书架进入阅读页时，可能需要等目录和活跃章节数据都加载完才能定位。
+  const initialScrollDone = useRef(false);
+  useEffect(() => {
+    if (initialScrollDone.current) return;
+    if (items.length === 0 || !activeChapterId) return;
+    initialScrollDone.current = true;
+    // 延迟执行，确保 DOM 已渲染完毕
+    const timer = window.setTimeout(() => {
+      const el = activeRef.current;
+      if (el) el.scrollIntoView({ block: 'center', behavior: 'auto' });
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [items, activeChapterId]);
 
   return (
     <aside
