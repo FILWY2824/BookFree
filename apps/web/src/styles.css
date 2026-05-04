@@ -126,26 +126,25 @@ body {
 }
 
 /* ─────────────────────────────────────────────────────────────────
-   Paginated reader. CSS columns turn the chapter HTML into a strip
-   of fixed-width pages laid out horizontally, with the viewport
-   masking everything but one page at a time.
+   Paginated reader (translateY 重构后版本)。
 
-   The container is given the *negative* translateX corresponding
-   to the active page index. Because columns are exactly 100% of
-   the viewport, the math is simply (pageIndex * width).
+   颠覆式重构后我们不再使用 CSS columns。原因是 EPUB 注入的 HTML 经常
+   带 inline style 或 class 触发 BFC（overflow / float / position 等），
+   一旦子元素是 BFC，CSS columns 就无法将其分割到下一列，超出列高度
+   时整个块就被截断——这是用户反馈的"文字被切""超出屏幕"bug 根因。
 
-   We disable inline image break-inside so figures don't get sliced
-   between pages, and force long words to break instead of producing
-   columns wider than the viewport.
+   新方案：
+   - .reader-paginated-viewport：overflow:hidden 的视口容器
+   - .reader-paginated：内容容器（自然高度）
+   - 翻页通过 translate(Y) 实现，对子元素的 CSS 没有任何要求
 
-   !! CRITICAL CSS COLUMN RULE !!
-   子元素绝对不能设置 overflow:hidden，否则会创建 block formatting
-   context，阻止 CSS column 将内容分割到多列中。一旦某个 div 设了
-   overflow:hidden，它就变成一个不可分割的整块，如果超出列高度就会
-   被截断。这是之前"文字超出屏幕"bug 的根本原因。
+   下面的规则是排版美化（字号、间距、图片限制等），不再有
+   "防止 column 溢出"的特殊规则。
    ───────────────────────────────────────────────────────────────── */
-.reader-paginated,
-.reader-paginated-track {
+.reader-paginated-viewport {
+  isolation: isolate;
+}
+.reader-paginated {
   color: var(--reader-fg);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;

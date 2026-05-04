@@ -442,18 +442,84 @@ export function topVisibleAnchor(root: HTMLElement, chapterId: string): CFIv2 | 
 // chapter has any non-empty heading; it is empty only when no
 // headings exist at all. The LAST entry is the heading the reader
 // is currently inside.
+// 收集章节内所有"标题"元素。
+//
+// 颠覆式增强：不只检测 h1-h6，还检测：
+//   - role="heading" 的元素
+//   - aria-level 属性
+//   - class 名包含 "heading" / "title" / "chapter" / "section" 的元素
+//   - 字体明显大于正文的 p / div（基于 computed font-size）
+//
+// 原因：很多 EPUB 不使用语义化的 h1-h6，而用 <p class="hd1">、<div class="title">
+// 之类的写法。如果 reader 只看 h1-h6，就检测不到这些"标题"，导致目录追踪失败。
+function findHeadings(root: HTMLElement): { el: HTMLElement; level: number }[] {
+  const out = new Map<HTMLElement, number>();
+
+  // 1. 语义化标题
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'))) {
+    const lvl = parseInt(el.tagName.charAt(1), 10);
+    if (lvl >= 1 && lvl <= 6) out.set(el, lvl);
+  }
+
+  // 2. ARIA 标题
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>('[role="heading"]'))) {
+    const lvlAttr = el.getAttribute('aria-level');
+    const lvl = lvlAttr ? parseInt(lvlAttr, 10) : 2;
+    if (lvl >= 1 && lvl <= 6) {
+      if (!out.has(el)) out.set(el, lvl);
+    }
+  }
+
+  // 3. class 名包含标题相关关键字的元素
+  const classQuery = '[class*="heading" i], [class*="title" i], [class*="chapter" i], [class*="section" i], [class*="hd" i]';
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>(classQuery))) {
+    if (out.has(el)) continue;
+    const text = (el.textContent ?? '').trim();
+    if (!text || text.length > 200) continue;
+    // 排除明显不是标题的元素（链接、按钮、表单元素）
+    const tag = el.tagName.toLowerCase();
+    if (['a', 'button', 'input', 'select', 'textarea', 'span'].includes(tag)) continue;
+    // 尝试从 class 名中提取层级
+    const cls = el.className || '';
+    let lvl = 0;
+    const m = cls.match(/(?:h|hd|heading|title|level)[-_]?([1-6])\b/i);
+    if (m) lvl = parseInt(m[1], 10);
+    if (lvl < 1 || lvl > 6) {
+      // 用 font-size 估计层级
+      try {
+        const fs = parseFloat(getComputedStyle(el).fontSize) || 16;
+        if (fs >= 28) lvl = 1;
+        else if (fs >= 22) lvl = 2;
+        else if (fs >= 19) lvl = 3;
+        else if (fs >= 17) lvl = 4;
+        else lvl = 5;
+      } catch {
+        lvl = 3;
+      }
+    }
+    out.set(el, lvl);
+  }
+
+  // 按文档顺序排序
+  const arr = Array.from(out.entries()).map(([el, level]) => ({ el, level }));
+  arr.sort((a, b) => {
+    if (a.el === b.el) return 0;
+    const pos = a.el.compareDocumentPosition(b.el);
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+  return arr;
+}
+
 export function precedingHeadings(root: HTMLElement): string[] {
-  // 收集章节内所有标题元素（h1-h6）。
-  const headings = Array.from(
-    root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'),
-  );
+  const headings = findHeadings(root);
   if (headings.length === 0) return [];
 
   // 收集所有段落（块级文本元素），用于判断当前阅读到哪里。
   const paragraphs = collectParagraphs(root);
 
   // 确定"当前阅读位置的 y 坐标"：找到第一个在视口内可见的段落。
-  // 同时检查水平位置，因为分页模式下内容横向排列在多列中。
   const vw = window.innerWidth || document.documentElement.clientWidth;
   const isVisible = (rect: DOMRect) =>
     rect.top >= 0 && rect.bottom > 0 &&
@@ -469,72 +535,53 @@ export function precedingHeadings(root: HTMLElement): string[] {
     }
   }
 
-  // 如果没有任何可见段落（比如刚加载章节），只返回第一个非空标题。
+  // 如果没有任何可见段落，再用标题本身找：找到第一个可见标题，
+  // 或退化为返回第一个非空标题。
   if (!foundVisible) {
     for (const h of headings) {
-      const t = (h.textContent ?? '').trim();
+      const rect = h.el.getBoundingClientRect();
+      if (isVisible(rect)) {
+        currentTop = rect.top;
+        foundVisible = true;
+        break;
+      }
+    }
+  }
+  if (!foundVisible) {
+    for (const h of headings) {
+      const t = (h.el.textContent ?? '').trim();
       if (t) return [t];
     }
     return [];
   }
 
   // ── 第一步：收集当前位置之前的所有标题 ──
-  // 遍历标题，只保留位于当前阅读位置之前（或正好在当前位置）的标题。
-  // TOL 容差：标题恰好在页面顶部时也算作"在视野内"。
   const rawPreceding: Array<{ level: number; text: string }> = [];
   const TOL = 4;
   for (const h of headings) {
-    const text = (h.textContent ?? '').trim();
+    const text = (h.el.textContent ?? '').trim();
     if (!text) continue;
-    const rect = h.getBoundingClientRect();
-
-    // 标题在当前页面右侧（未来的页面），终止遍历。
+    const rect = h.el.getBoundingClientRect();
     if (rect.left >= vw) break;
-
-    if (rect.right <= 0 || rect.top > currentTop + TOL) {
-      // 标题已经超过当前阅读位置的垂直位置，终止遍历。
-      if (rect.top > currentTop + TOL) break;
-      // 标题在屏幕左侧（已翻过的页面），但垂直位置在当前阅读位置之前，
-      // 属于已读内容的真实前序标题，记录之。
-    } else if (rect.top > currentTop + TOL) {
+    if (rect.top > currentTop + TOL) {
+      // 已超过当前阅读位置
       break;
     }
-
-    // 从标签名提取标题层级：h1→1, h2→2, ..., h6→6
-    const level = parseInt(h.tagName.charAt(1), 10);
-    rawPreceding.push({ level, text });
+    rawPreceding.push({ level: h.level, text });
   }
 
   // ── 第二步：将扁平标题列表重建为层次化路径 ──
-  // 核心逻辑：
-  //   用一个 6 槽的数组（对应 h1-h6）维护"当前层级栈"。
-  //   遇到 h_n 标题时，更新第 n 层为当前标题，并清空 n+1 及以下的层级。
-  //   这样可以保证结果始终是一条从最外层到最内层的祖先链。
-  //
-  // 例如，文档中依次出现：h1="第一章" → h2="1.1" → h3="1.1.1" → h2="1.2" → h3="1.2.1"
-  // 当用户阅读到 h3="1.2.1" 时：
-  //   遇到 h1="第一章" → stack = ["第一章", -, -, -, -, -]
-  //   遇到 h2="1.1"    → stack = ["第一章", "1.1", -, -, -, -]
-  //   遇到 h3="1.1.1"  → stack = ["第一章", "1.1", "1.1.1", -, -, -]
-  //   遇到 h2="1.2"    → stack = ["第一章", "1.2", -, -, -, -]  ← 1.1 和 1.1.1 被清除
-  //   遇到 h3="1.2.1"  → stack = ["第一章", "1.2", "1.2.1", -, -, -]
-  //   最终输出 → ["第一章", "1.2", "1.2.1"]
-
-  const stack: Array<string | null> = [null, null, null, null, null, null]; // 对应 h1-h6
+  const stack: Array<string | null> = [null, null, null, null, null, null];
   for (const { level, text } of rawPreceding) {
-    const idx = level - 1; // h1→0, h2→1, ...
+    const idx = Math.max(0, Math.min(5, level - 1));
     stack[idx] = text;
-    // 清空比当前标题更深的层级（它们属于之前兄弟节点的子内容）
     for (let i = idx + 1; i < 6; i++) stack[i] = null;
   }
-
-  // 输出非空层级，从最外层到最内层排列。
   const out = stack.filter((s): s is string => s !== null);
 
-  // 如果没有找到任何前序标题，至少返回第一个非空标题。
   if (out.length === 0) {
     for (const h of headings) {
-      const t = (h.textContent ?? '').trim();
+      const t = (h.el.textContent ?? '').trim();
       if (t) { out.push(t); break; }
     }
   }
@@ -552,12 +599,12 @@ export function closestPrecedingHeading(root: HTMLElement): string | null {
 // visible. Caller passes the scroll/page handler. Returns true if
 // we found the anchor and asked the caller to navigate.
 export interface NavigateOpts {
-  /** True for paginated mode: caller flips pages until the paragraph
-   *  is on the visible page. We compute the target page index by
-   *  measuring offsetLeft against the column track's width. */
+  /** True for paginated mode (translateY). */
   paginated: boolean;
-  /** Track width when paginated. */
-  trackWidth?: number;
+  /** 视口高度（一页可见高度，像素）。 */
+  pageHeight?: number;
+  /** 每一页的 translateY 偏移列表。元素 0 为第 0 页起点 (=0)。 */
+  pageBreaks?: number[];
   /** Reader-controlled callback to apply the chosen page index. */
   onPage?: (idx: number) => void;
   /** Reader-controlled callback to scroll to a paragraph. */
@@ -580,10 +627,20 @@ export function navigateToCFIv2(
     para = paragraphs.find(p => (p.el.textContent ?? '').includes(needle));
   }
   if (!para) return false;
-  if (opts.paginated && opts.onPage && opts.trackWidth && opts.trackWidth > 0) {
-    const off = (para.el as HTMLElement).offsetLeft;
-    const target = Math.max(0, Math.floor(off / opts.trackWidth));
-    opts.onPage(target);
+  if (opts.paginated && opts.onPage) {
+    // translateY 分页：找到目标段落的 offsetTop，再在 pageBreaks 中
+    // 找最大的 break 值 ≤ offsetTop，对应的索引就是目标页。
+    const top = (para.el as HTMLElement).offsetTop;
+    const breaks = opts.pageBreaks;
+    let target = 0;
+    if (breaks && breaks.length > 0) {
+      for (let i = breaks.length - 1; i >= 0; i--) {
+        if (breaks[i] <= top) { target = i; break; }
+      }
+    } else if (opts.pageHeight && opts.pageHeight > 0) {
+      target = Math.floor(top / opts.pageHeight);
+    }
+    opts.onPage(Math.max(0, target));
     return true;
   }
   if (opts.onScroll) {

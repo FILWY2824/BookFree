@@ -185,9 +185,23 @@ export default function TxtReader({
   // scrollProseRef 指向滚动模式下的外层容器（包含标题、正文、页脚），
   // 仅用于 onClick 事件代理。proseRef 才是批注和定位的操作根节点。
   const scrollProseRef = useRef<HTMLDivElement>(null);
+  // pageboxRef 指向分页模式下的视口容器（overflow:hidden）。
+  // 颠覆式重构：彻底放弃 CSS columns 方案。
+  // CSS columns 在面对任意 EPUB 注入的 HTML 时极不可靠：BFC、break-inside、
+  // 列高度计算偏差等问题导致内容溢出阅读区域、被裁掉一半。
+  // 改用最朴素的方案：内容自然垂直流动，pageIdx 翻页时只修改 translateY，
+  // 视口的 overflow:hidden 严格裁剪。这种做法对所有 HTML 都稳定。
+  const pageboxRef = useRef<HTMLDivElement>(null);
   // 分页状态：pageIdx 是当前页索引，pageCount 是当前章节计算出来的总页数。
   const [pageIdx, setPageIdx] = useState(0);
   const [pageCount, setPageCount] = useState(1);
+  // 分页模式下每一页的视口高度（像素）。
+  const [pageHeight, setPageHeight] = useState(0);
+  // 分页模式下每一页对应的 translateY 偏移量数组。
+  // pageBreaks[i] 表示第 i 页内容相对内容顶部的 Y 坐标。
+  // 例：[0, 720, 1438] 表示第 0 页从 0 起、第 1 页从 720px 起、第 2 页从 1438px 起。
+  // 这些 Y 值优先选择在段落边界，避免页面底部把一行文字切成两半。
+  const pageBreaksRef = useRef<number[]>([0]);
   // 标注与笔记：从后端 SQLite 读取后放入 React state，再同步到正文 DOM。
   const [highlights, setHighlights] = useState<Highlight[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -271,6 +285,9 @@ export default function TxtReader({
         if (cancelled) return;
         setBody(d.chapter);
         setPageIdx(0);
+        // 重置分页断点：新章节的内容不同，旧的 breaks 不再适用，
+        // 等 useLayoutEffect 重新测量后会填充。
+        pageBreaksRef.current = [0];
         if (scrollRef.current) scrollRef.current.scrollTo({ top: 0 });
         // 告诉 ReaderPage 当前显示的是哪一章，这样目录面板可以及时高亮。
         onActiveChapterChange?.(d.chapter.id);
@@ -330,19 +347,30 @@ export default function TxtReader({
     const chapterHighlights = highlights.filter(
       h => !h.chapterId || h.chapterId === body.id,
     );
-    const applied = applyAllHighlights(root, chapterHighlights, notedSet);
+    // 立即应用一次：捕获那些 DOM 已就绪的批注。
+    applyAllHighlights(root, chapterHighlights, notedSet);
 
     // 始终在下一帧验证高亮是否存在于 DOM 中。
     // 即使 applyAllHighlights 报告成功，React 的后续协调可能移除 DOM 节点，
-    // 或者 CSS columns 的布局重排可能导致 Range 失效。
+    // 或者布局重排可能导致 Range 失效。
     const retryHandles: number[] = [];
     if (chapterHighlights.length > 0) {
+      const expectedIds = new Set(chapterHighlights.map(h => h.id));
       const doRetry = () => {
         const r = proseRef.current;
         if (!r) return;
-        // 检查 DOM 中实际存在的高亮 span 数量
-        const existing = r.querySelectorAll('span[data-hl-id]').length;
-        if (existing > 0) return; // 高亮已经正确渲染
+        // 收集 DOM 中已渲染的所有不同 highlight id
+        const have = new Set<string>();
+        r.querySelectorAll<HTMLElement>('span[data-hl-id]').forEach(s => {
+          const id = s.getAttribute('data-hl-id');
+          if (id) have.add(id);
+        });
+        // 如果所有期望的高亮都已在 DOM 中，无需重试
+        let allPresent = true;
+        for (const id of expectedIds) {
+          if (!have.has(id)) { allPresent = false; break; }
+        }
+        if (allPresent) return;
         clearHighlights(r);
         applyAllHighlights(r, chapterHighlights, notedSet);
       };
@@ -359,37 +387,32 @@ export default function TxtReader({
     }
 
     if (pageMode === 'paginated') {
-      // CSS multicol pagination: the column-track lives on the
-      // proseRef's PARENT (the div with columnWidth:100% / columnFill:
-      // auto inside PaginatedFrame). proseRef itself is just a single
-      // block element being flowed into columns — its own scrollWidth
-      // reports a single column width, so we measure on the parent.
-      //
-      // We use Math.ceil rather than round: a chapter that overflows
-      // by even one line needs a second page to be flippable. The old
-      // round() cost the user the last page on chapters whose final
-      // text didn't fill more than half the column.
-      const track = root.parentElement as HTMLElement | null;
-      if (track) {
-        const total = track.scrollWidth;
-        const view = track.clientWidth || 1;
-        setPageCount(Math.max(1, Math.ceil(total / view)));
-      } else {
-        setPageCount(1);
+      // 颠覆式重构：基于 translateY 的垂直分页。
+      // 1. 测量内容自然高度（content.scrollHeight）。
+      // 2. 测量视口高度（pagebox.clientHeight）。
+      // 3. 计算页数 = ceil(content / viewport)。
+      // 4. 找到段落级"干净断点"，避免一行文字被切成两半。
+      const pagebox = pageboxRef.current;
+      if (pagebox && root) {
+        const measure = () => {
+          const ph = pagebox.clientHeight;
+          const total = root.scrollHeight;
+          if (ph <= 0) return;
+          const breaks = computePageBreaks(root, ph);
+          pageBreaksRef.current = breaks;
+          setPageHeight(ph);
+          setPageCount(Math.max(1, breaks.length));
+          setPageIdx(i => Math.min(i, breaks.length - 1));
+          void total;
+        };
+        measure();
+        // 多帧重测：字体换行 / 图片解码 / 高亮包裹 都可能改变高度
+        retryHandles.push(requestAnimationFrame(measure));
+        retryHandles.push(requestAnimationFrame(() =>
+          retryHandles.push(requestAnimationFrame(measure)),
+        ));
+        retryHandles.push(window.setTimeout(measure, 250) as unknown as number);
       }
-      // Second-pass after the browser has applied multicol layout —
-      // font swap / image decode / highlight wrapping all happen
-      // mid-frame, so we re-measure on the next frame.
-      const raf = requestAnimationFrame(() => {
-        const t = root.parentElement as HTMLElement | null;
-        if (!t) return;
-        const total = t.scrollWidth;
-        const view = t.clientWidth || 1;
-        const pages = Math.max(1, Math.ceil(total / view));
-        setPageCount(pages);
-        setPageIdx(i => Math.min(i, pages - 1));
-      });
-      retryHandles.push(raf);
       if (!readyFiredRef.current) {
         readyFiredRef.current = true;
         onReady?.();
@@ -476,22 +499,26 @@ export default function TxtReader({
   useEffect(() => {
     if (pageMode !== 'paginated') return;
     const root = proseRef.current;
-    const track = root?.parentElement as HTMLElement | null;
-    if (!root || !track) return;
+    const pagebox = pageboxRef.current;
+    if (!root || !pagebox) return;
     const recompute = () => {
-      const t = root.parentElement as HTMLElement | null;
-      if (!t) return;
-      const total = t.scrollWidth;
-      const view = t.clientWidth || 1;
-      const pages = Math.max(1, Math.ceil(total / view));
-      setPageCount(pages);
-      setPageIdx(i => Math.min(i, pages - 1));
+      const r = proseRef.current;
+      const pb = pageboxRef.current;
+      if (!r || !pb) return;
+      const ph = pb.clientHeight;
+      if (ph <= 0) return;
+      const breaks = computePageBreaks(r, ph);
+      pageBreaksRef.current = breaks;
+      setPageHeight(ph);
+      setPageCount(Math.max(1, breaks.length));
+      setPageIdx(i => Math.min(i, breaks.length - 1));
     };
     window.addEventListener('resize', recompute);
     let ro: ResizeObserver | undefined;
     if (typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver(recompute);
-      ro.observe(track);
+      ro.observe(pagebox);
+      ro.observe(root);
     }
     return () => {
       window.removeEventListener('resize', recompute);
@@ -513,19 +540,19 @@ export default function TxtReader({
     if (!root) return;
     const dec = decodeLocatorAny(initialAnchor.locator);
     if (!dec) return;
-    // Wait two frames so multicol has measured.
+    // Wait two frames so layout has measured.
     const raf1 = requestAnimationFrame(() => {
       const raf2 = requestAnimationFrame(() => {
         const r = root;
         if (!r) return;
-        const trackEl = r.parentElement as HTMLElement | null;
         const cfi: CFIv2 | null = dec.version === 'cfiv2' && dec.steps
           ? { chapterId: dec.chapterId ?? body.id, steps: dec.steps }
           : null;
         if (!cfi) return;
         navigateToCFIv2(r, cfi, undefined, {
           paginated: pageMode === 'paginated',
-          trackWidth: trackEl?.clientWidth ?? 0,
+          pageHeight,
+          pageBreaks: pageBreaksRef.current,
           onPage: idx => setPageIdx(idx),
           onScroll: el => el.scrollIntoView({ block: 'start', behavior: 'auto' }),
         });
@@ -535,7 +562,7 @@ export default function TxtReader({
     });
     return () => cancelAnimationFrame(raf1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [body, initialAnchor, pageMode, html]);
+  }, [body, initialAnchor, pageMode, html, pageHeight]);
 
   // ── 阅读进度上报 ────────────────────────────────────────────────
   // 用户翻页或滚动时，TxtReader 会找出“当前屏幕最上方可见段落”，编码成 CFIv2
@@ -670,14 +697,14 @@ export default function TxtReader({
       // the track's viewport width.
       const first = wrapped[0];
       if (pageMode === 'paginated') {
-        const track = root.parentElement as HTMLElement | null;
-        if (track) {
-          const view = track.clientWidth || 1;
-          // first.offsetLeft is relative to the TRACK (its offsetParent
-          // is the column track). page index = floor(offsetLeft / view).
-          const target = Math.max(0, Math.floor(first.offsetLeft / view));
-          setPageIdx(target);
+        // 颠覆式重构：translateY 分页下，目标页 = 元素 offsetTop 所在的 break 区间。
+        const breaks = pageBreaksRef.current;
+        const top = first.offsetTop;
+        let target = 0;
+        for (let i = breaks.length - 1; i >= 0; i--) {
+          if (breaks[i] <= top) { target = i; break; }
         }
+        setPageIdx(target);
       } else {
         first.scrollIntoView({ block: 'center', behavior: 'smooth' });
       }
@@ -1160,23 +1187,17 @@ export default function TxtReader({
         {pageMode === 'paginated' ? (
           <PaginatedFrame
             pageIdx={pageIdx}
-            pageCount={pageCount}
             prefs={prefs}
             bodyFontFamily={bodyFontFamily}
+            pageHeight={pageHeight}
+            pageBreaks={pageBreaksRef.current}
+            pageboxRef={pageboxRef}
           >
             <div
               ref={proseRef}
-              className="reader-prose reader-paginated reader-paginated-track"
+              className="reader-prose"
               onClick={onProseClick}
               dangerouslySetInnerHTML={{ __html: html || '' }}
-              // Inline font styles are needed here because the parent
-              // track element's font cascade is sometimes overridden
-              // by descendant inline-styled elements in the chapter
-              // HTML. Setting them on the prose root makes the picker
-              // wins-everywhere — without this, swapping fontFamily in
-              // the settings drawer had no visible effect because some
-              // chapter content (e.g. <p style="..."> from imported
-              // EPUBs) shadowed the parent style.
               style={{
                 fontSize: prefs.fontSize + 'px',
                 lineHeight: prefs.lineHeight,
@@ -1244,71 +1265,135 @@ export default function TxtReader({
   );
 }
 
-// PaginatedFrame：使用 CSS columns 实现“横向分页”。
+// PaginatedFrame：颠覆式重构后使用 translateY 实现垂直分页。
 //
-// 这里是分页模式最关键的布局结构。它故意使用三层 div：
+// 旧方案（CSS columns）的根本性缺陷：
+//   - CSS columns 要求子元素能够自由分割到下一列；
+//   - 任何子元素一旦创建 BFC（overflow:hidden / display:flow-root /
+//     float / position:absolute / contain 等），就变成不可分割的整块，
+//     超出列高度时就被 overflow 裁掉一半；
+//   - EPUB 注入的 HTML 经常带 inline style 或 class 触发 BFC，无法
+//     在前端可靠地拦截；
+//   - 任何 max-width:100% / overflow:hidden 等"防溢出"规则反而会
+//     破坏 column flow，让问题更严重。
 //
-//   <viewport>            // overflow:hidden，屏幕真正可见的区域
-//     <padder>            // 只负责 padding，定义内容盒子的宽度
-//       <track>           // CSS columns 和 translateX 都放在这里
-//         {children}      // 章节正文 prose
-//       </track>
-//     </padder>
-//   </viewport>
+// 新方案：朴素的 translateY 分页
+//   - 内容容器以自然高度生成（无 columns、无 BFC 干扰）；
+//   - 视口容器 overflow:hidden 严格裁剪超出部分；
+//   - pageIdx 翻页时仅修改 translateY；
+//   - 页面边界尽量对齐段落顶部，避免一行文字被切成两半；
+//   - 在所有 HTML 输入下都稳定。
 //
-// 为什么不能把 padding、columns、translateX 都放在同一个元素上？
-// 因为 `translateX(-100%)` 的 100% 会按 padding-box 计算，而 CSS column 的
-// 可读区域又受 content-box 影响，两者不一致时会出现：第一页空白、内容被切断、
-// 最后一页丢失等问题。三层结构让“列宽”和“横向移动距离”严格一致。
+// 这种做法的代价是不再依赖浏览器的 column 排版，分页计算放到 JS 中。
+// 好处是完全可控，与 EPUB 来源 CSS 解耦。
 function PaginatedFrame({
-  pageIdx, pageCount, prefs, bodyFontFamily, children,
+  pageIdx, prefs, bodyFontFamily, pageHeight, pageBreaks, pageboxRef, children,
 }: {
   pageIdx: number;
-  pageCount: number;
   prefs: ReaderPrefs;
   bodyFontFamily: string;
+  pageHeight: number;
+  pageBreaks: number[];
+  pageboxRef: React.RefObject<HTMLDivElement>;
   children: React.ReactNode;
 }) {
-  void pageCount;
+  void pageHeight;
+  const offsetY = pageBreaks[pageIdx] ?? 0;
   return (
     <div
-      className="h-full w-full"
-      style={{ overflow: 'hidden', boxSizing: 'border-box' }}
+      ref={pageboxRef}
+      className="reader-paginated-viewport"
+      style={{
+        height: '100%',
+        width: '100%',
+        overflow: 'hidden',
+        position: 'relative',
+        boxSizing: 'border-box',
+      }}
     >
       <div
+        className="reader-paginated"
         style={{
-          height: '100%',
-          padding: '3.5rem 2.5rem 5rem',
+          position: 'absolute',
+          top: 0,
+          left: '50%',
+          transform: `translateX(-50%) translateY(${-offsetY}px)`,
+          transition: 'transform 220ms cubic-bezier(0.2, 0, 0, 1)',
+          willChange: 'transform',
+          width: '100%',
           maxWidth: columnMaxWidth(prefs),
-          margin: '0 auto',
+          padding: '3.5rem 2.5rem 3.5rem',
           boxSizing: 'border-box',
-          overflow: 'hidden',
+          fontSize: prefs.fontSize + 'px',
+          lineHeight: prefs.lineHeight,
+          fontFamily: bodyFontFamily,
         }}
       >
-        <div
-          className="reader-paginated reader-paginated-track"
-          style={{
-            height: '100%',
-            width: '100%',
-            boxSizing: 'border-box',
-            fontSize: prefs.fontSize + 'px',
-            lineHeight: prefs.lineHeight,
-            fontFamily: bodyFontFamily,
-            columnWidth: '100%',
-            columnGap: '0',
-            columnFill: 'auto',
-            transform: `translateX(${-pageIdx * 100}%)`,
-            transition: 'transform 220ms cubic-bezier(0.2, 0, 0, 1)',
-            // 注意：track 层绝不能设置 overflow:hidden！
-            // CSS columns 要求内容能够自由流动到下一列。
-            // overflow:hidden 会创建 BFC，阻止列分割，导致内容被截断。
-          }}
-        >
-          {children}
-        </div>
+        {children}
       </div>
     </div>
   );
+}
+
+// computePageBreaks 计算分页模式的 translateY 偏移列表。
+//
+// 输入：
+//   content - 内容容器（高度自然）
+//   viewportHeight - 视口高度（一页可见高度）
+//
+// 输出：
+//   number[] - 每页的 translateY 偏移
+//
+// 算法：
+//   1. 收集所有候选断点（段落、标题、列表项等块级元素的 offsetTop）；
+//   2. 从 0 开始，目标 = 上一页 + viewportHeight；
+//   3. 在 [上一页, 目标] 区间内找最大的候选断点，作为本页起点；
+//   4. 找不到则直接用目标位置（避免无限循环；视觉上可能切一行，
+//      但比内容溢出阅读区域好）；
+//   5. 直至覆盖全部内容。
+function computePageBreaks(content: HTMLElement, viewportHeight: number): number[] {
+  if (viewportHeight <= 0) return [0];
+  const totalHeight = content.scrollHeight;
+  if (totalHeight <= viewportHeight + 4) return [0];
+
+  // 收集候选断点（块级文本元素的 offsetTop）。
+  const candidateSet = new Set<number>();
+  const blocks = content.querySelectorAll<HTMLElement>(
+    'p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, figure, hr, table, ul, ol, dl, dd',
+  );
+  for (const el of Array.from(blocks)) {
+    const text = (el.textContent ?? '').trim();
+    const hasMedia = !!el.querySelector('img, svg, video, audio, picture, hr');
+    if (!text && !hasMedia && el.tagName.toLowerCase() !== 'hr') continue;
+    candidateSet.add(el.offsetTop);
+  }
+  const candidates = Array.from(candidateSet).sort((a, b) => a - b);
+
+  const breaks: number[] = [0];
+  // 安全上限：避免极端情况下死循环。
+  const maxPages = Math.max(2, Math.ceil(totalHeight / Math.max(1, viewportHeight)) + 4);
+  while (breaks.length < maxPages) {
+    const last = breaks[breaks.length - 1];
+    const target = last + viewportHeight;
+    if (target >= totalHeight - 4) break;
+
+    // 在 (last, target] 区间内，找最大的候选断点，且要至少推进 30% 视口高度，
+    // 避免页面太短（只显示几行）。
+    const minAdvance = last + Math.max(40, viewportHeight * 0.3);
+    let snap = -1;
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const c = candidates[i];
+      if (c > minAdvance && c <= target) { snap = c; break; }
+    }
+    if (snap > last) {
+      breaks.push(snap);
+    } else {
+      // 找不到合适的段落断点（比如这一页全是一个超长段落）——
+      // 直接用 target 推进。视觉上可能切一行，但能保证翻页有进展。
+      breaks.push(target);
+    }
+  }
+  return breaks;
 }
 
 function ChapterFooter({
