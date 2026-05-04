@@ -96,17 +96,6 @@ body {
   margin-top: 1em;
 }
 .reader-prose img { max-width: 100%; height: auto; margin: 1em auto; display: block; }
-/* 滚动模式下也需要防止 EPUB 注入的样式导致内容溢出 */
-.reader-prose div,
-.reader-prose section,
-.reader-prose article {
-  max-width: 100%;
-  overflow-wrap: break-word;
-}
-.reader-prose img {
-  max-height: 80vh;
-  object-fit: contain;
-}
 .reader-prose blockquote {
   border-left: 3px solid var(--reader-border);
   padding-left: 1em;
@@ -129,13 +118,11 @@ body {
   padding: 1em;
   border-radius: 0.5em;
   overflow-x: auto;
-  max-width: 100%;
 }
-/* 表格在滚动模式下也不能超出容器 */
 .reader-prose table {
   max-width: 100%;
-  display: block;
   overflow-x: auto;
+  display: block;
 }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -150,34 +137,23 @@ body {
    We disable inline image break-inside so figures don't get sliced
    between pages, and force long words to break instead of producing
    columns wider than the viewport.
+
+   !! CRITICAL CSS COLUMN RULE !!
+   子元素绝对不能设置 overflow:hidden，否则会创建 block formatting
+   context，阻止 CSS column 将内容分割到多列中。一旦某个 div 设了
+   overflow:hidden，它就变成一个不可分割的整块，如果超出列高度就会
+   被截断。这是之前"文字超出屏幕"bug 的根本原因。
    ───────────────────────────────────────────────────────────────── */
 .reader-paginated,
 .reader-paginated-track {
-  /* See note on .reader-prose above — font-family is NOT declared here
-     so the inline style on the page wrapper actually wins. */
   color: var(--reader-fg);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   letter-spacing: 0;
   word-spacing: 0;
-  /* 防止分页模式下内容溢出：长字符串、表格、预格式化文本不能超出列边界。 */
   overflow-wrap: break-word;
   word-break: break-word;
-}
-/* ── 分页模式溢出防御 ──
-   CSS columns 只在水平方向分列，垂直方向上的溢出不会被自动裁剪。
-   必须在 track 和内容层都做防御，确保任何子元素不能逃出阅读区域。 */
-.reader-paginated-track {
-  overflow: hidden;
-}
-/* 所有 EPUB/章节 HTML 注入的后代元素都不允许超出容器边界。
-   这是防止 EPUB 自带 CSS（如 position:absolute, min-height, overflow:visible）
-   导致文字出现在阅读区域之外的关键规则。 */
-.reader-paginated *,
-.reader-paginated-track * {
-  max-width: 100% !important;
-  box-sizing: border-box;
 }
 .reader-paginated p { margin: 1em 0; }
 .reader-paginated h1, .reader-paginated h2, .reader-paginated h3 {
@@ -189,11 +165,6 @@ body {
 .reader-paginated h1 { font-size: 1.5em; }
 .reader-paginated h2 { font-size: 1.25em; }
 .reader-paginated h3 { font-size: 1.1em; }
-/* Same first-child / heading clamps as .reader-prose. CRITICAL for
-   paginated mode: a single h1 with `margin-top: 6em` declared inline
-   by the EPUB will, in CSS columns, push the heading down 6em from
-   the column top and leave the entire visible page apparently blank.
-   That's the user-reported "字都是屏幕下方" bug. */
 .reader-paginated > *:first-child {
   margin-top: 0 !important;
   padding-top: 0 !important;
@@ -211,26 +182,7 @@ body {
   break-inside: avoid;
   max-width: 100%;
 }
-/* 图片在分页模式下绝对不能超出列高度，否则会溢出到页面底部。 */
-.reader-paginated img {
-  height: auto;
-  max-height: 90vh;
-  object-fit: contain;
-}
-/* 强制所有行内样式中可能包含的 position 和 overflow 不能逃逸 */
-.reader-paginated div,
-.reader-paginated section,
-.reader-paginated article,
-.reader-paginated aside,
-.reader-paginated figure {
-  position: static !important;
-  overflow: hidden;
-  max-height: none;
-}
-/* 但允许 hl 高亮 span 保持 position:relative（用于笔记图标等） */
-.reader-paginated span[data-hl-id] {
-  position: relative !important;
-}
+.reader-paginated img { height: auto; max-height: 80vh; }
 .reader-paginated blockquote {
   border-left: 3px solid var(--reader-border);
   padding-left: 1em;
@@ -242,8 +194,6 @@ body {
   padding: 1em;
   border-radius: 0.5em;
   overflow-x: auto;
-  /* pre 元素在分页模式下限制最大高度，防止超长代码块撑破列边界 */
-  max-height: 80vh;
 }
 
 /* ─────────────────────────────────────────────────────────────────

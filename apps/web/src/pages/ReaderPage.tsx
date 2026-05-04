@@ -550,7 +550,11 @@ export default function ReaderPage() {
       return { chapterTitle: '', activeTocLabel: null, activeTocPath: [] } as R;
     }
 
-    if (activeHeadingPath.length > 0) {
+    // ── 第一优先级：通过 heading 路径匹配 TOC ──
+    // reader 上报的 activeHeadingPath 是当前页面可见的标题层级链，
+    // 例如 ["第一部分 基础篇", "第1章...", "1.2 一致性", "1.2.3 复制状态机"]。
+    // findTocByHeadingPath 从最深标题向上逐级尝试匹配 TOC 节点。
+    if (activeHeadingPath.length > 0 && tocItems.length > 0) {
       const hit = findTocByHeadingPath(tocItems, activeHeadingPath);
       if (hit) {
         return {
@@ -559,44 +563,42 @@ export default function ReaderPage() {
           activeTocPath: hit.ancestorLabels,
         } as R;
       }
-
-      /*
-       * 如果 TOC 没有匹配项，仍然显示 reader 识别到的最深标题。
-       * 这样比顶部完全空白更有帮助。
-       */
-      const deepest = activeHeadingPath[activeHeadingPath.length - 1];
-      return {
-        chapterTitle: deepest,
-        activeTocLabel: null,
-        activeTocPath: [],
-      } as R;
+      // heading 匹配失败——不要 return！继续往下尝试 chapterId 匹配。
+      // 之前的代码在此处直接 return，导致 chapterId 回退永远无法执行，
+      // 这就是目录不跟踪的根本原因。
     }
 
-    /*
-     * 没有标题路径时，通过 activeChapterId 在 TOC 树中查找当前章节，
-     * 构建祖先路径用于目录高亮。这样即使章节内容没有 h1-h6 标题，
-     * 目录也能正确追踪到当前章节及其上级目录。
-     */
+    // ── 第二优先级：通过 activeChapterId 匹配 TOC ──
+    // 当章节内容没有可匹配的 h1-h6 标题，或标题与 TOC 标签不一致时，
+    // 回退到章节 ID 匹配。这保证即使 heading 匹配彻底失败，
+    // 目录仍然能追踪到当前章节及其上级目录。
     if (activeChapterId && tocItems.length > 0) {
       const tocPath = findTocPathByChapterId(tocItems, activeChapterId);
       if (tocPath && tocPath.length > 0) {
         const last = tocPath[tocPath.length - 1];
+        // 如果同时有 heading 路径，用最深 heading 作为顶部标题显示
+        const headingTitle = activeHeadingPath.length > 0
+          ? activeHeadingPath[activeHeadingPath.length - 1]
+          : null;
         return {
-          chapterTitle: last.label,
+          chapterTitle: headingTitle || last.label,
           activeTocLabel: last.label,
           activeTocPath: tocPath.map(it => it.label),
         } as R;
       }
     }
 
-    /*
-     * 如果 TOC 中也找不到，退回到章节列表。
-     */
+    // ── 第三优先级：从章节列表中提取标题 ──
     const active = activeChapterId
       ? chapters.find(c => c.id === activeChapterId)
       : chapters[chapterOrd];
 
     const raw = active?.title?.trim() ?? '';
+    // 如果有 heading 路径但 TOC 匹配全部失败，至少显示最深 heading
+    if (activeHeadingPath.length > 0) {
+      const deepest = activeHeadingPath[activeHeadingPath.length - 1];
+      return { chapterTitle: deepest, activeTocLabel: null, activeTocPath: [] } as R;
+    }
     if (raw && !isAutoChapterTitle(raw, active?.ord ?? -1)) {
       return { chapterTitle: raw, activeTocLabel: null, activeTocPath: [] } as R;
     }

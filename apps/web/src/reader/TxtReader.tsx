@@ -332,26 +332,30 @@ export default function TxtReader({
     );
     const applied = applyAllHighlights(root, chapterHighlights, notedSet);
 
-    // 多轮重试机制：如果本轮有待应用的高亮但全部或部分解析失败，
-    // 通过 RAF + setTimeout 多次重试，确保批注在 DOM 稳定后能成功应用。
+    // 始终在下一帧验证高亮是否存在于 DOM 中。
+    // 即使 applyAllHighlights 报告成功，React 的后续协调可能移除 DOM 节点，
+    // 或者 CSS columns 的布局重排可能导致 Range 失效。
     const retryHandles: number[] = [];
-    if (chapterHighlights.length > 0 && applied < chapterHighlights.length) {
+    if (chapterHighlights.length > 0) {
       const doRetry = () => {
         const r = proseRef.current;
         if (!r) return;
+        // 检查 DOM 中实际存在的高亮 span 数量
+        const existing = r.querySelectorAll('span[data-hl-id]').length;
+        if (existing > 0) return; // 高亮已经正确渲染
         clearHighlights(r);
         applyAllHighlights(r, chapterHighlights, notedSet);
       };
-      // 快速重试：下一帧
+      // 第一轮：下一帧
       retryHandles.push(requestAnimationFrame(doRetry));
-      // 中等重试：3 帧后（CSS columns / font swap 可能需要多帧才稳定）
+      // 第二轮：3 帧后
       retryHandles.push(requestAnimationFrame(() =>
         retryHandles.push(requestAnimationFrame(() =>
           retryHandles.push(requestAnimationFrame(doRetry)),
         )),
       ));
-      // 兜底重试：200ms 后（覆盖异步字体加载等场景）
-      retryHandles.push(window.setTimeout(doRetry, 200) as unknown as number);
+      // 兜底：300ms 后
+      retryHandles.push(window.setTimeout(doRetry, 300) as unknown as number);
     }
 
     if (pageMode === 'paginated') {
@@ -1269,26 +1273,16 @@ function PaginatedFrame({
   return (
     <div
       className="h-full w-full"
-      style={{ overflow: 'hidden', boxSizing: 'border-box', position: 'relative' }}
+      style={{ overflow: 'hidden', boxSizing: 'border-box' }}
     >
       <div
         style={{
           height: '100%',
-          // 阅读区域四周留有充足间距，确保文字不贴边：
-          // padding：上 3.5rem 下 5rem 左右 2.5rem。
-          // 底部留更大空间以避免 CSS columns 中最后一行被截断的视觉问题。
           padding: '3.5rem 2.5rem 5rem',
           maxWidth: columnMaxWidth(prefs),
           margin: '0 auto',
           boxSizing: 'border-box',
           overflow: 'hidden',
-          // 绝对定位 + inset:0 确保这一层完全填满视口，
-          // 不会因为内容膨胀而超出父容器。
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
         }}
       >
         <div
@@ -1300,22 +1294,14 @@ function PaginatedFrame({
             fontSize: prefs.fontSize + 'px',
             lineHeight: prefs.lineHeight,
             fontFamily: bodyFontFamily,
-            // CSS columns: column-width:100% gives us one column ==
-            // one viewport-width-of-content. column-fill:auto keeps
-            // columns at the track's height (otherwise Chrome
-            // distributes content evenly across the track's columns,
-            // which we don't want — we want pages packed top-down).
             columnWidth: '100%',
             columnGap: '0',
             columnFill: 'auto',
             transform: `translateX(${-pageIdx * 100}%)`,
             transition: 'transform 220ms cubic-bezier(0.2, 0, 0, 1)',
-            // 关键修复：track 层也必须 overflow:hidden，
-            // 防止 CSS columns 内的内容在垂直方向溢出。
-            // 之前只有外层 viewport 和 padder 有 overflow:hidden，
-            // 但 track 本身没有，导致某些元素（如带 margin 的标题、
-            // 固定高度图片）可以垂直溢出到阅读区域以外。
-            overflow: 'hidden',
+            // 注意：track 层绝不能设置 overflow:hidden！
+            // CSS columns 要求内容能够自由流动到下一列。
+            // overflow:hidden 会创建 BFC，阻止列分割，导致内容被截断。
           }}
         >
           {children}

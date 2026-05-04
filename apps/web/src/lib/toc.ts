@@ -180,13 +180,14 @@ function matches(label: string, needle: string): boolean {
 /** 从标题字符串中提取编号前缀和剩余文字。
  *  例："1.2.1 一致性模型" → { num: "1.2.1", text: "一致性模型" }
  *      "1.2 一致性"       → { num: "1.2", text: "一致性" }
- *      "第一章 引言"      → { num: "第一章", text: "引言" } */
+ *      "第一章 引言"      → { num: "第一章", text: "引言" }
+ *      "第1章 引言"       → { num: "第1章", text: "引言" } */
 function extractNumPrefix(s: string): { num: string; text: string } | null {
   // 数字编号：1.2.1 / 1.2 等
   const m1 = s.match(/^([\d.]+)\s+(.+)/);
   if (m1) return { num: m1[1], text: collapseSpaces(m1[2]) };
-  // 中文编号：第一章 / 第二节 等
-  const m2 = s.match(/^(第[零一二三四五六七八九十百千]+[章节節篇回卷])\s*(.*)/);
+  // 中文编号（含中文数字或阿拉伯数字）：第一章 / 第1章 / 第二节 等
+  const m2 = s.match(/^(第[零一二三四五六七八九十百千\d]+[章节節篇回卷部])\s*(.*)/);
   if (m2) return { num: m2[1], text: collapseSpaces(m2[2] || '') };
   return null;
 }
